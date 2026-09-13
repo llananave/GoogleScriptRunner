@@ -745,9 +745,16 @@
         var actionTd = el('td');
         var delBtn = el('button', 'btn danger small', 'Delete');
         delBtn.addEventListener('click', function () {
-          if (!window.confirm('Delete channel "' + c.displayName + '"? This will NOT delete its imported data sheets - only the channel entry itself.')) return;
-          runServer('deleteChannel', [c.key, false], function () {
-            toast('Channel deleted.', 'success');
+          var deleteData = window.confirm(
+            'Delete channel "' + c.displayName + '"?\n\n' +
+            'Click OK to ALSO permanently delete its imported BANK and BO data sheets (cannot be undone).\n' +
+            'Click Cancel to keep the data sheets - only the channel entry is removed, and the data can be relinked later from Setup Diagnostics.'
+          );
+          if (deleteData) {
+            if (!window.confirm('Really delete ALL imported data for "' + c.displayName + '"? This cannot be undone.')) return;
+          }
+          runServer('deleteChannel', [c.key, deleteData], function () {
+            toast('Channel "' + c.displayName + '" deleted' + (deleteData ? ' along with its data sheets.' : ' (data sheets kept).'), 'success');
             loadSettings();
           });
         });

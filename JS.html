@@ -601,9 +601,10 @@
         '<div style="color:var(--red);font-weight:600">⚠ Setup failed with an error:</div>' +
         '<div style="font-family:monospace;font-size:12px;background:#fce8e6;padding:8px;border-radius:6px;margin-top:6px">' +
         (info.error || 'Unknown error') + '</div>' +
-        '<div style="margin-top:8px">This usually means the script has not been authorized yet, or the deployment\'s ' +
-        '"Execute as" setting needs to be "Me" rather than "User accessing the web app". ' +
-        'Click "Re-run Setup" below after checking Deploy &gt; Manage deployments in the Apps Script editor.</div>';
+        '<div style="margin-top:8px">This usually means the connected data spreadsheet could not be opened ' +
+        '(wrong account, moved/trashed, or the script property was lost after a redeploy/copy of the project). ' +
+        'Your existing data has not been deleted. Use "Reconnect to an Existing Spreadsheet" below with the URL ' +
+        'of your actual data spreadsheet, or click "Re-run Setup" to start a fresh one if you don\'t have existing data to recover.</div>';
       return;
     }
 
@@ -611,6 +612,7 @@
       ['Data spreadsheet', '<a href="' + info.spreadsheetUrl + '" target="_top">' + info.spreadsheetName + '</a>'],
       ['Sheets found', info.sheetNames.join(', ')],
       ['Rows in Config tab', String(info.configRowCount)],
+      ['Active channels detected', String(info.activeChannelCount)],
       ['Running as (active user)', info.activeUser],
       ['Script owner (effective user)', info.effectiveUser]
     ];
@@ -620,8 +622,19 @@
       html += '<div><strong>' + r[0] + ':</strong> ' + r[1] + '</div>';
     });
     if (info.configRowCount === 0) {
-      html += '<div style="color:var(--red);margin-top:8px;font-weight:600">⚠ The Config tab has 0 rows - ' +
-        'that\'s why no channels show up below. Click "Re-run Setup" to seed the default channels.</div>';
+      html += '<div style="color:var(--red);margin-top:8px;font-weight:600">⚠ The Config tab of the spreadsheet above has 0 rows - ' +
+        'that\'s why no channels show up below. If you expected existing channels, this app may be pointing at the wrong ' +
+        'spreadsheet - check the link above and use "Reconnect" below if it\'s not the one you expect. Otherwise, click ' +
+        '"Re-run Setup" to seed the default channels.</div>';
+    } else if (info.activeChannelCount === 0) {
+      html += '<div style="color:var(--red);margin-top:8px;font-weight:600">⚠ The Config tab above has ' + info.configRowCount +
+        ' row(s), but none are marked Active - that\'s why the dropdowns are empty. Check the Channels table below and ' +
+        'activate the ones you need.</div>';
+    }
+    if (info.lastOpenError) {
+      html += '<div style="color:var(--amber);margin-top:8px">⚠ A previous attempt to open the connected spreadsheet failed' +
+        (info.lastOpenErrorAt ? ' at ' + new Date(info.lastOpenErrorAt).toLocaleString() : '') + ': <span style="font-family:monospace;font-size:12px">' +
+        info.lastOpenError + '</span>. If the spreadsheet above isn\'t the one you expect, use "Reconnect" below.</div>';
     }
     box.innerHTML = html;
   }
@@ -633,6 +646,18 @@
       toast('Setup ran successfully.', 'success');
       loadDiagnostics();
       loadSettings();
+    });
+  });
+
+  document.getElementById('btn-reconnect-ss').addEventListener('click', function () {
+    var val = document.getElementById('reconnect-ss-input').value.trim();
+    if (!val) { toast('Paste the spreadsheet URL or id first.', 'error'); return; }
+    runServer('reconnectDataSpreadsheet', [val], function (result) {
+      toast('Reconnected to "' + result.spreadsheetName + '" (' + result.configRowCount + ' channel row(s) found).', 'success');
+      document.getElementById('reconnect-ss-input').value = '';
+      loadDiagnostics();
+      loadSettings();
+      loadChannels(loadDashboard);
     });
   });
 

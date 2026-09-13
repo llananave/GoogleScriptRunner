@@ -85,7 +85,14 @@ function initializeApp() {
 function getSetupDiagnostics() {
   var props = PropertiesService.getScriptProperties();
   var storedId = props.getProperty('DATA_SS_ID');
-  var info = { storedSpreadsheetId: storedId || null, ok: false };
+  var lastOpenError = props.getProperty('DATA_SS_ID_OPEN_ERROR');
+  var lastOpenErrorAt = props.getProperty('DATA_SS_ID_OPEN_ERROR_AT');
+  var info = {
+    storedSpreadsheetId: storedId || null,
+    ok: false,
+    lastOpenError: lastOpenError || null,
+    lastOpenErrorAt: lastOpenErrorAt || null
+  };
 
   try {
     var ss = getDataSpreadsheet();
@@ -96,6 +103,7 @@ function getSetupDiagnostics() {
     var configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
     info.configSheetExists = !!configSheet;
     info.configRowCount = configSheet ? Math.max(0, configSheet.getLastRow() - 1) : 0;
+    info.activeChannelCount = getChannels().filter(function (c) { return c.active; }).length;
 
     var activeUser = '';
     var effectiveUser = '';

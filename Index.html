@@ -226,6 +226,23 @@
         </div>
 
         <div class="card">
+          <h3>Reconnect to an Existing Spreadsheet</h3>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-top:-4px">
+            If your channels or imported data seem to have disappeared, the app may be pointing at a
+            different (empty) spreadsheet than the one you expect - see the diagnostics above.
+            Paste the URL (or id) of your actual data spreadsheet here to point the app back at it.
+            This does not modify or delete anything in that spreadsheet.
+          </p>
+          <div class="form-grid">
+            <div class="field" style="grid-column:1 / -1">
+              <label>Spreadsheet URL or ID</label>
+              <input type="text" id="reconnect-ss-input" placeholder="https://docs.google.com/spreadsheets/d/.../edit">
+            </div>
+            <div class="field"><label>&nbsp;</label><button class="btn" id="btn-reconnect-ss">🔗 Reconnect</button></div>
+          </div>
+        </div>
+
+        <div class="card">
           <h3>Channels</h3>
           <table id="settings-table">
             <thead><tr><th>Channel</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>

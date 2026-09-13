@@ -31,32 +31,84 @@ var SIDE_BO = 'BO';
  * Returns (creating if necessary) the spreadsheet that stores all app data.
  * The spreadsheet id is cached in Script Properties so every user of the
  * deployed web app shares the same data store.
+ *
+ * IMPORTANT: if the stored id can no longer be opened (wrong account,
+ * permission revoked, sheet trashed, property lost after a redeploy/copy of
+ * the project, etc.) this does NOT silently create a brand-new empty
+ * spreadsheet and orphan your existing data. Instead it records what
+ * happened (surfaced on the Settings > Setup Diagnostics panel) and throws,
+ * so you get a clear error instead of an app that looks "empty" for no
+ * apparent reason. Use reconnectDataSpreadsheet() to point the app back at
+ * the correct spreadsheet if this happens.
  */
 function getDataSpreadsheet() {
   var props = PropertiesService.getScriptProperties();
   var ssId = props.getProperty('DATA_SS_ID');
-  var ss = null;
 
   if (ssId) {
     try {
-      ss = SpreadsheetApp.openById(ssId);
+      return SpreadsheetApp.openById(ssId);
     } catch (err) {
-      ss = null; // stored id is stale / inaccessible - fall through and recreate
+      props.setProperty('DATA_SS_ID_OPEN_ERROR', (err && err.message) ? err.message : String(err));
+      props.setProperty('DATA_SS_ID_OPEN_ERROR_AT', new Date().toISOString());
+      throw new Error(
+        'Could not open the connected data spreadsheet (id: ' + ssId + '). It may have been trashed, ' +
+        'moved, or the account running this script no longer has access to it. Your data has NOT been ' +
+        'deleted or replaced. Go to Settings > Setup Diagnostics and use "Reconnect to an existing ' +
+        'spreadsheet" with the correct spreadsheet URL, or restore access to the original one. ' +
+        '(Underlying error: ' + ((err && err.message) ? err.message : String(err)) + ')'
+      );
     }
   }
 
-  if (!ss) {
-    ss = SpreadsheetApp.create(DATA_SPREADSHEET_NAME);
-    props.setProperty('DATA_SS_ID', ss.getId());
-    var defaultSheet = ss.getSheets()[0];
-    defaultSheet.setName('Welcome');
-    defaultSheet.getRange('A1').setValue(
-      'This spreadsheet is the data store for the "' + APP_TITLE + '" web app. ' +
-      'Use the web app UI to manage everything here - manual edits are possible but not required.'
-    );
+  // No id stored yet at all - this is a genuinely first-ever run, safe to create.
+  var ss = SpreadsheetApp.create(DATA_SPREADSHEET_NAME);
+  props.setProperty('DATA_SS_ID', ss.getId());
+  props.deleteProperty('DATA_SS_ID_OPEN_ERROR');
+  props.deleteProperty('DATA_SS_ID_OPEN_ERROR_AT');
+  var defaultSheet = ss.getSheets()[0];
+  defaultSheet.setName('Welcome');
+  defaultSheet.getRange('A1').setValue(
+    'This spreadsheet is the data store for the "' + APP_TITLE + '" web app. ' +
+    'Use the web app UI to manage everything here - manual edits are possible but not required.'
+  );
+  return ss;
+}
+
+/**
+ * Points the app at a different, already-existing data spreadsheet (by id or
+ * full URL). Use this to recover from a lost/incorrect DATA_SS_ID script
+ * property without losing data that already lives in that spreadsheet -
+ * nothing here modifies the target spreadsheet's contents.
+ */
+function reconnectDataSpreadsheet(idOrUrl) {
+  var input = String(idOrUrl || '').trim();
+  if (!input) throw new Error('Please provide a spreadsheet URL or id.');
+
+  var id = input;
+  var match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match) id = match[1];
+
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(id);
+  } catch (err) {
+    throw new Error('Could not open that spreadsheet - double-check the URL/id and that this account has access to it.');
   }
 
-  return ss;
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty('DATA_SS_ID', ss.getId());
+  props.deleteProperty('DATA_SS_ID_OPEN_ERROR');
+  props.deleteProperty('DATA_SS_ID_OPEN_ERROR_AT');
+
+  ensureConfigSheet(ss);
+  ensureLogSheet(ss);
+
+  return {
+    spreadsheetUrl: ss.getUrl(),
+    spreadsheetName: ss.getName(),
+    configRowCount: Math.max(0, ensureConfigSheet(ss).getLastRow() - 1)
+  };
 }
 
 function ensureConfigSheet(ss) {

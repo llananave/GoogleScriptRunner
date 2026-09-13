@@ -135,3 +135,72 @@ function deleteChannel(channelKey, alsoDeleteData) {
   }
   return true;
 }
+
+/**
+ * Scans the data spreadsheet for "BANK - X" / "BO - X" sheet pairs that
+ * don't have a matching row in the Config tab - e.g. because the Config
+ * row was removed via "Delete channel" (which intentionally leaves the
+ * underlying data sheets alone) but the sheets themselves were never
+ * deleted - and recreates a Config row for each one so the channel shows
+ * back up in the app. This NEVER creates, renames, or deletes any BANK/BO
+ * sheet; it only ever appends missing Config rows.
+ */
+function findOrphanedChannelSheets() {
+  var ss = getDataSpreadsheet();
+  var existingKeys = {};
+  getChannels().forEach(function (c) { existingKeys[c.key] = true; });
+
+  var bankPrefix = 'BANK - ';
+  var boPrefix = 'BO - ';
+  var pairs = {};
+
+  ss.getSheets().forEach(function (s) {
+    var name = s.getName();
+    if (name.indexOf(bankPrefix) === 0) {
+      var key = name.substring(bankPrefix.length);
+      pairs[key] = pairs[key] || {};
+      pairs[key].bank = true;
+    } else if (name.indexOf(boPrefix) === 0) {
+      var key2 = name.substring(boPrefix.length);
+      pairs[key2] = pairs[key2] || {};
+      pairs[key2].bo = true;
+    }
+  });
+
+  var orphans = [];
+  Object.keys(pairs).forEach(function (key) {
+    if (existingKeys[key]) return; // already has a Config row - not orphaned
+    orphans.push({
+      key: key,
+      hasBank: !!pairs[key].bank,
+      hasBo: !!pairs[key].bo,
+      complete: !!(pairs[key].bank && pairs[key].bo)
+    });
+  });
+
+  return orphans;
+}
+
+/**
+ * Recreates Config rows for orphaned channel sheet pairs found by
+ * findOrphanedChannelSheets(). Only relinks pairs that have BOTH a BANK and
+ * a BO sheet, to avoid guessing at a display name / config for a half sheet.
+ * New rows default to 1 day / 0.01 amount tolerance and Active = true;
+ * adjust those afterwards in the Channels table if needed.
+ */
+function relinkOrphanedChannels() {
+  var ss = getDataSpreadsheet();
+  var sheet = ensureConfigSheet(ss);
+  var orphans = findOrphanedChannelSheets();
+  var now = new Date();
+  var relinked = [];
+  var skippedIncomplete = [];
+
+  orphans.forEach(function (o) {
+    if (!o.complete) { skippedIncomplete.push(o.key); return; }
+    sheet.appendRow([o.key, o.key, 1, 0.01, true, now]);
+    relinked.push(o.key);
+  });
+
+  return { relinked: relinked, skippedIncomplete: skippedIncomplete };
+}

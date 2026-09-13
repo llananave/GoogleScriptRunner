@@ -104,6 +104,7 @@ function getSetupDiagnostics() {
     info.configSheetExists = !!configSheet;
     info.configRowCount = configSheet ? Math.max(0, configSheet.getLastRow() - 1) : 0;
     info.activeChannelCount = getChannels().filter(function (c) { return c.active; }).length;
+    info.orphanedChannelSheets = findOrphanedChannelSheets();
 
     var activeUser = '';
     var effectiveUser = '';

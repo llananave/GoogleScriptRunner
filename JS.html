@@ -596,7 +596,9 @@
 
   function renderDiagnostics(info) {
     var box = document.getElementById('diagnostics-info');
+    var relinkBtn = document.getElementById('btn-relink-orphans');
     if (!info.ok) {
+      relinkBtn.classList.add('hidden');
       box.innerHTML =
         '<div style="color:var(--red);font-weight:600">⚠ Setup failed with an error:</div>' +
         '<div style="font-family:monospace;font-size:12px;background:#fce8e6;padding:8px;border-radius:6px;margin-top:6px">' +
@@ -636,6 +638,24 @@
         (info.lastOpenErrorAt ? ' at ' + new Date(info.lastOpenErrorAt).toLocaleString() : '') + ': <span style="font-family:monospace;font-size:12px">' +
         info.lastOpenError + '</span>. If the spreadsheet above isn\'t the one you expect, use "Reconnect" below.</div>';
     }
+
+    var completeOrphans = (info.orphanedChannelSheets || []).filter(function (o) { return o.complete; });
+    var incompleteOrphans = (info.orphanedChannelSheets || []).filter(function (o) { return !o.complete; });
+    if (completeOrphans.length > 0) {
+      html += '<div style="color:var(--amber);margin-top:8px;font-weight:600">⚠ Found ' + completeOrphans.length +
+        ' channel data sheet pair(s) with NO matching Config row (likely deleted via "Delete channel" without deleting data): ' +
+        completeOrphans.map(function (o) { return o.key; }).join(', ') +
+        '. Their imported data is untouched. Click "Relink Missing Channels" below to add them back to the dropdowns.</div>';
+      relinkBtn.classList.remove('hidden');
+    } else {
+      relinkBtn.classList.add('hidden');
+    }
+    if (incompleteOrphans.length > 0) {
+      html += '<div style="color:var(--text-muted);margin-top:8px">Note: found a BANK or BO sheet with no matching pair and no ' +
+        'Config row for: ' + incompleteOrphans.map(function (o) { return o.key; }).join(', ') +
+        '. These were left alone since only one side of the pair exists.</div>';
+    }
+
     box.innerHTML = html;
   }
 
@@ -646,6 +666,19 @@
       toast('Setup ran successfully.', 'success');
       loadDiagnostics();
       loadSettings();
+    });
+  });
+
+  document.getElementById('btn-relink-orphans').addEventListener('click', function () {
+    runServer('relinkOrphanedChannels', [], function (result) {
+      if (result.relinked.length > 0) {
+        toast('Relinked ' + result.relinked.length + ' channel(s): ' + result.relinked.join(', '), 'success');
+      } else {
+        toast('Nothing to relink.', 'error');
+      }
+      loadDiagnostics();
+      loadSettings();
+      loadChannels(loadDashboard);
     });
   });
 

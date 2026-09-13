@@ -1,0 +1,721 @@
+<script>
+  // ==========================================================================
+  //  Client-side application logic.
+  //  Talks to the server exclusively through google.script.run.
+  // ==========================================================================
+
+  var state = {
+    channels: [],
+    importSide: 'BANK',
+    bankAmountMode: 'single',
+    lastPreviewHeaders: [],
+    selectedExceptionBank: null,
+    selectedExceptionBo: null,
+    exceptionsCache: { bank: [], bo: [] },
+    importCsvText: '',
+    importFileName: ''
+  };
+
+  // ---------------------------------------------------------------- helpers
+
+  function showLoading(show) {
+    document.getElementById('overlay-loading').classList.toggle('hidden', !show);
+  }
+
+  function toast(message, type) {
+    var container = document.getElementById('toast-container');
+    var el = document.createElement('div');
+    el.className = 'toast' + (type ? ' ' + type : '');
+    el.textContent = message;
+    container.appendChild(el);
+    setTimeout(function () { el.remove(); }, 4500);
+  }
+
+  function runServer(fnName, args, onSuccess, opts) {
+    opts = opts || {};
+    if (opts.loading !== false) showLoading(true);
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (opts.loading !== false) showLoading(false);
+        onSuccess(result);
+      })
+      .withFailureHandler(function (err) {
+        if (opts.loading !== false) showLoading(false);
+        toast((err && err.message) ? err.message : String(err), 'error');
+        if (opts.onError) opts.onError(err);
+      })
+      [fnName].apply(null, args || []);
+  }
+
+  function fmtMoney(n) {
+    n = Number(n) || 0;
+    var sign = n < 0 ? '-' : '';
+    return sign + '₱' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function fmtPct(n) { return (Number(n) * 100).toFixed(1) + '%'; }
+
+  function el(tag, className, html) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (html !== undefined) e.innerHTML = html;
+    return e;
+  }
+
+  // ---------------------------------------------------------------- nav
+
+  document.querySelectorAll('.nav-item').forEach(function (item) {
+    item.addEventListener('click', function () {
+      var page = item.getAttribute('data-page');
+      document.querySelectorAll('.nav-item').forEach(function (n) { n.classList.remove('active'); });
+      document.querySelectorAll('.page').forEach(function (p) { p.classList.remove('active'); });
+      item.classList.add('active');
+      document.getElementById('page-' + page).classList.add('active');
+      onPageShown(page);
+    });
+  });
+
+  function onPageShown(page) {
+    if (page === 'dashboard') loadDashboard();
+    if (page === 'import') refreshChannelDropdowns();
+    if (page === 'reconcile') refreshChannelDropdowns();
+    if (page === 'exceptions') refreshChannelDropdowns(loadExceptions);
+    if (page === 'settings') { loadSettings(); loadDiagnostics(); }
+  }
+
+  function gotoPage(page) {
+    document.querySelector('.nav-item[data-page="' + page + '"]').click();
+  }
+
+  // ---------------------------------------------------------------- bootstrap
+
+  window.addEventListener('DOMContentLoaded', function () {
+    // Even if initializeApp errors out (e.g. a transient permissions prompt),
+    // still attempt to load whatever channels already exist so the UI isn't
+    // left permanently blank.
+    runServer('initializeApp', [], function (res) {
+      document.getElementById('open-sheet-link').href = res.spreadsheetUrl;
+      loadChannels(function () {
+        loadDashboard();
+      });
+    }, {
+      onError: function () {
+        loadChannels(function () { loadDashboard(); });
+      }
+    });
+  });
+
+  function loadChannels(cb) {
+    runServer('getChannels', [], function (channels) {
+      state.channels = channels;
+      refreshChannelDropdowns();
+      if (cb) cb();
+    }, { loading: false });
+  }
+
+  function refreshChannelDropdowns(cb) {
+    var selects = [
+      document.getElementById('import-channel'),
+      document.getElementById('reconcile-channel'),
+      document.getElementById('exceptions-channel')
+    ];
+    var activeChannels = state.channels.filter(function (c) { return c.active; });
+
+    selects.forEach(function (sel) {
+      var prev = sel.value;
+      sel.innerHTML = '';
+
+      if (activeChannels.length === 0) {
+        var placeholder = el(
+          'option',
+          null,
+          state.channels.length === 0
+            ? '— No channels found. Add one in Settings. —'
+            : '— No ACTIVE channels. Activate one in Settings. —'
+        );
+        placeholder.value = '';
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        sel.appendChild(placeholder);
+      } else {
+        activeChannels.forEach(function (c) {
+          try {
+            var opt = el('option', null, c.displayName);
+            opt.value = c.key;
+            sel.appendChild(opt);
+          } catch (optErr) {
+            console.error('Failed to render channel option', c, optErr);
+          }
+        });
+        if (prev && activeChannels.some(function (c) { return c.key === prev; })) sel.value = prev;
+      }
+    });
+    if (cb) cb();
+  }
+
+  // ================================================================== DASHBOARD
+
+  function loadDashboard() {
+    runServer('getDashboardData', [], function (data) {
+      renderDashboardStats(data.overall);
+      renderDashboardTable(data.channels);
+      document.getElementById('open-sheet-link').href = data.spreadsheetUrl;
+    });
+  }
+
+  function renderDashboardStats(overall) {
+    var container = document.getElementById('dashboard-stats');
+    container.innerHTML = '';
+    var cards = [
+      { label: 'Total Bank Rows', value: overall.totalBank, cls: 'accent-blue' },
+      { label: 'Total Back-Office Rows', value: overall.totalBo, cls: 'accent-blue' },
+      { label: 'Matched Pairs', value: overall.matched, cls: 'accent-green' },
+      { label: 'Unmatched Rows', value: overall.unmatchedBank + overall.unmatchedBo, cls: 'accent-red' },
+      { label: 'Overall Match Rate', value: fmtPct(overall.matchRate), cls: 'accent-amber' }
+    ];
+    cards.forEach(function (c) {
+      var card = el('div', 'stat-card ' + c.cls);
+      card.appendChild(el('div', 'value', c.value));
+      card.appendChild(el('div', 'label', c.label));
+      container.appendChild(card);
+    });
+  }
+
+  function renderDashboardTable(channels) {
+    var tbody = document.querySelector('#dashboard-table tbody');
+    tbody.innerHTML = '';
+    if (channels.length === 0) {
+      tbody.appendChild(el('tr', null, '<td colspan="8" class="empty-state">No channels configured yet - add one in Settings.</td>'));
+      return;
+    }
+    channels.forEach(function (c) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, c.displayName + (c.active ? '' : ' <span class="badge inactive">inactive</span>')));
+      tr.appendChild(el('td', null, c.totalBank));
+      tr.appendChild(el('td', null, c.totalBo));
+      tr.appendChild(el('td', null, c.matched));
+      tr.appendChild(el('td', null, (c.unmatchedBank + c.unmatchedBo)));
+
+      var rateTd = el('td');
+      var track = el('div', 'progress-bar-track');
+      var fill = el('div', 'progress-bar-fill');
+      fill.style.width = Math.min(100, c.matchRate * 100) + '%';
+      if (c.matchRate < 0.6) fill.style.background = 'var(--red)';
+      else if (c.matchRate < 0.9) fill.style.background = 'var(--amber)';
+      track.appendChild(fill);
+      rateTd.appendChild(track);
+      rateTd.appendChild(el('div', null, '<small>' + fmtPct(c.matchRate) + '</small>'));
+      tr.appendChild(rateTd);
+
+      tr.appendChild(el('td', null, c.lastRun ? fmtDate(c.lastRun) : '<small style="color:var(--text-muted)">never</small>'));
+
+      var actionTd = el('td');
+      var btn = el('button', 'btn secondary small', 'Reconcile');
+      btn.addEventListener('click', function () {
+        gotoPage('reconcile');
+        document.getElementById('reconcile-channel').value = c.key;
+      });
+      actionTd.appendChild(btn);
+      tr.appendChild(actionTd);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('btn-refresh-dashboard').addEventListener('click', loadDashboard);
+
+  // ================================================================== IMPORT
+
+  document.getElementById('import-side').addEventListener('click', function (e) {
+    var target = e.target.closest('div[data-value]');
+    if (!target) return;
+    document.querySelectorAll('#import-side div').forEach(function (d) { d.classList.remove('selected'); });
+    target.classList.add('selected');
+    state.importSide = target.getAttribute('data-value');
+    document.getElementById('mapping-section').classList.add('hidden');
+  });
+
+  document.getElementById('bank-amount-mode').addEventListener('click', function (e) {
+    var target = e.target.closest('div[data-value]');
+    if (!target) return;
+    document.querySelectorAll('#bank-amount-mode div').forEach(function (d) { d.classList.remove('selected'); });
+    target.classList.add('selected');
+    state.bankAmountMode = target.getAttribute('data-value');
+    var single = state.bankAmountMode === 'single';
+    document.getElementById('bank-amount-single').classList.toggle('hidden', !single);
+    document.getElementById('bank-amount-split-1').classList.toggle('hidden', single);
+    document.getElementById('bank-amount-split-2').classList.toggle('hidden', single);
+  });
+
+  // ------------------------------------------------------ file upload / drop
+
+  function stripBom(text) {
+    return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+  }
+
+  function handleImportFile(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      state.importCsvText = stripBom(String(e.target.result || ''));
+      state.importFileName = file.name;
+      var fnEl = document.getElementById('file-drop-filename');
+      fnEl.textContent = file.name + ' (' + Math.max(1, Math.round(file.size / 1024)) + ' KB)';
+      fnEl.classList.add('has-file');
+      document.getElementById('btn-clear-file').classList.remove('hidden');
+      // Uploading a new file supersedes anything typed in the paste fallback.
+      document.getElementById('import-csv').value = '';
+      document.getElementById('mapping-section').classList.add('hidden');
+      toast('File loaded: ' + file.name, 'success');
+    };
+    reader.onerror = function () {
+      toast('Could not read that file. Please try again.', 'error');
+    };
+    reader.readAsText(file);
+  }
+
+  var fileDrop = document.getElementById('import-file-drop');
+  var fileInput = document.getElementById('import-csv-file');
+
+  fileDrop.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function (e) {
+    if (e.target.files && e.target.files[0]) handleImportFile(e.target.files[0]);
+  });
+
+  ['dragenter', 'dragover'].forEach(function (evtName) {
+    fileDrop.addEventListener(evtName, function (e) {
+      e.preventDefault(); e.stopPropagation();
+      fileDrop.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (evtName) {
+    fileDrop.addEventListener(evtName, function (e) {
+      e.preventDefault(); e.stopPropagation();
+      fileDrop.classList.remove('dragover');
+    });
+  });
+  fileDrop.addEventListener('drop', function (e) {
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files[0]) handleImportFile(files[0]);
+  });
+
+  document.getElementById('btn-clear-file').addEventListener('click', function (e) {
+    e.stopPropagation();
+    state.importCsvText = '';
+    state.importFileName = '';
+    fileInput.value = '';
+    document.getElementById('import-csv').value = '';
+    var fnEl = document.getElementById('file-drop-filename');
+    fnEl.textContent = 'No file selected';
+    fnEl.classList.remove('has-file');
+    document.getElementById('btn-clear-file').classList.add('hidden');
+    document.getElementById('mapping-section').classList.add('hidden');
+  });
+
+  // Typing into the paste fallback supersedes any uploaded file.
+  document.getElementById('import-csv').addEventListener('input', function () {
+    if (this.value.trim()) {
+      state.importCsvText = '';
+      state.importFileName = '';
+      fileInput.value = '';
+      var fnEl = document.getElementById('file-drop-filename');
+      fnEl.textContent = 'No file selected';
+      fnEl.classList.remove('has-file');
+      document.getElementById('btn-clear-file').classList.add('hidden');
+    }
+  });
+
+  function getImportCsvText() {
+    var pasted = document.getElementById('import-csv').value.trim();
+    return pasted || state.importCsvText.trim();
+  }
+
+  document.getElementById('btn-preview-csv').addEventListener('click', function () {
+    var csv = getImportCsvText();
+    if (!csv) { toast('Upload a CSV file (or paste CSV text) first.', 'error'); return; }
+    runServer('previewCsv', [csv], function (preview) {
+      state.lastPreviewHeaders = preview.headers;
+      document.getElementById('import-preview-info').textContent =
+        preview.totalDataRows + ' data row(s) detected, ' + preview.headers.length + ' column(s).';
+      renderSampleTable(preview.headers, preview.sampleRows);
+      renderMappingFields(preview.headers);
+      document.getElementById('mapping-section').classList.remove('hidden');
+      document.getElementById('import-result-info').textContent = '';
+    });
+  });
+
+  function renderSampleTable(headers, sampleRows) {
+    var thead = document.querySelector('#sample-table thead');
+    var tbody = document.querySelector('#sample-table tbody');
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+    var headRow = el('tr');
+    headers.forEach(function (h) { headRow.appendChild(el('th', null, h || '<em>(blank)</em>')); });
+    thead.appendChild(headRow);
+    sampleRows.forEach(function (r) {
+      var tr = el('tr');
+      r.forEach(function (v) { tr.appendChild(el('td', null, String(v))); });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function populateColumnSelect(selectEl, headers, allowBlank) {
+    selectEl.innerHTML = '';
+    if (allowBlank) selectEl.appendChild(el('option', null, '(none)')).value = '';
+    headers.forEach(function (h) {
+      var opt = el('option', null, h || '(blank header)');
+      opt.value = h;
+      selectEl.appendChild(opt);
+    });
+  }
+
+  function guessColumn(headers, keywords) {
+    for (var i = 0; i < headers.length; i++) {
+      var h = (headers[i] || '').toLowerCase();
+      for (var k = 0; k < keywords.length; k++) {
+        if (h.indexOf(keywords[k]) !== -1) return headers[i];
+      }
+    }
+    return '';
+  }
+
+  function renderMappingFields(headers) {
+    var isBank = state.importSide === 'BANK';
+    document.getElementById('mapping-fields-bank').classList.toggle('hidden', !isBank);
+    document.getElementById('mapping-fields-bo').classList.toggle('hidden', isBank);
+
+    var containerId = isBank ? 'mapping-fields-bank' : 'mapping-fields-bo';
+    var selects = document.querySelectorAll('#' + containerId + ' select[data-map]');
+    selects.forEach(function (sel) {
+      var field = sel.getAttribute('data-map');
+      var allowBlank = ['descCol', 'typeCol', 'secondaryRefCol'].indexOf(field) !== -1;
+      populateColumnSelect(sel, headers, allowBlank);
+
+      var guesses = {
+        dateCol: ['date', 'time'],
+        refCol: ['reference', 'ref', 'trxn', 'txnid', 'transaction code', 'transaction id', 'rrn', 'correlation'],
+        descCol: ['description', 'remarks', 'merchant', 'msg'],
+        amountCol: ['amount'],
+        depositCol: ['deposit', 'credit'],
+        withdrawalCol: ['withdrawal', 'debit'],
+        patronCol: ['patron', 'player', 'buyer', 'account', 'userid'],
+        typeCol: ['type', 'txntype', 'transaction type'],
+        secondaryRefCol: ['uw', 'fm id', 'txnid', 'extrefid']
+      };
+      if (guesses[field]) {
+        var guess = guessColumn(headers, guesses[field]);
+        if (guess) sel.value = guess;
+      }
+    });
+  }
+
+  document.getElementById('btn-do-import').addEventListener('click', function () {
+    var channelKey = document.getElementById('import-channel').value;
+    if (!channelKey) { toast('Choose a channel first.', 'error'); return; }
+    var csv = getImportCsvText();
+    if (!csv) { toast('Upload a CSV file (or paste CSV text) first.', 'error'); return; }
+    var isBank = state.importSide === 'BANK';
+    var containerId = isBank ? 'mapping-fields-bank' : 'mapping-fields-bo';
+    var mapping = { amountMode: state.bankAmountMode };
+    document.querySelectorAll('#' + containerId + ' select[data-map]').forEach(function (sel) {
+      mapping[sel.getAttribute('data-map')] = sel.value;
+    });
+
+    runServer('importData', [channelKey, state.importSide, csv, mapping], function (result) {
+      document.getElementById('import-result-info').textContent =
+        'Imported ' + result.imported + ' new row(s), skipped ' + result.skippedDuplicates + ' duplicate(s) out of ' + result.totalRowsInFile + ' total.';
+      toast('Import complete: ' + result.imported + ' new row(s) added.', 'success');
+      document.getElementById('btn-clear-file').click();
+    });
+  });
+
+  // ================================================================== RECONCILE
+
+  document.getElementById('btn-run-reconciliation').addEventListener('click', function () {
+    var channelKey = document.getElementById('reconcile-channel').value;
+    if (!channelKey) { toast('Choose a channel first.', 'error'); return; }
+    runServer('runReconciliation', [channelKey], function (result) {
+      document.getElementById('reconcile-result-card').classList.remove('hidden');
+      var container = document.getElementById('reconcile-result-stats');
+      container.innerHTML = '';
+      var cards = [
+        { label: 'Total Bank Rows', value: result.totalBank, cls: 'accent-blue' },
+        { label: 'Total Back-Office Rows', value: result.totalBo, cls: 'accent-blue' },
+        { label: 'Newly Matched', value: result.newlyMatched, cls: 'accent-green' },
+        { label: 'Still Unmatched (Bank)', value: result.unmatchedBank, cls: 'accent-red' },
+        { label: 'Still Unmatched (Back-Office)', value: result.unmatchedBo, cls: 'accent-red' }
+      ];
+      cards.forEach(function (c) {
+        var card = el('div', 'stat-card ' + c.cls);
+        card.appendChild(el('div', 'value', c.value));
+        card.appendChild(el('div', 'label', c.label));
+        container.appendChild(card);
+      });
+      toast('Reconciliation complete for ' + result.channel + '.', 'success');
+      state.lastReconciledChannel = channelKey;
+    });
+  });
+
+  document.getElementById('btn-goto-exceptions').addEventListener('click', function () {
+    gotoPage('exceptions');
+    if (state.lastReconciledChannel) {
+      document.getElementById('exceptions-channel').value = state.lastReconciledChannel;
+    }
+    loadExceptions();
+  });
+
+  // ================================================================== EXCEPTIONS
+
+  document.getElementById('exceptions-channel').addEventListener('change', loadExceptions);
+  document.getElementById('btn-refresh-exceptions').addEventListener('click', loadExceptions);
+
+  function currentExceptionsChannel() {
+    return document.getElementById('exceptions-channel').value;
+  }
+
+  function loadExceptions() {
+    var channelKey = currentExceptionsChannel();
+    if (!channelKey) return;
+    state.selectedExceptionBank = null;
+    state.selectedExceptionBo = null;
+    updateManualMatchButton();
+
+    runServer('getExceptions', [channelKey, false], function (data) {
+      state.exceptionsCache = data;
+      renderExceptionsTable('bank', data.bank);
+      renderExceptionsTable('bo', data.bo);
+    });
+  }
+
+  function renderExceptionsTable(side, rows) {
+    var tbody = document.querySelector('#exceptions-' + side + '-table tbody');
+    var emptyEl = document.getElementById('exceptions-' + side + '-empty');
+    tbody.innerHTML = '';
+    emptyEl.classList.toggle('hidden', rows.length > 0);
+
+    rows.forEach(function (r) {
+      var tr = el('tr');
+
+      var cb = document.createElement('input');
+      cb.type = 'radio';
+      cb.name = 'select-' + side;
+      cb.addEventListener('change', function () {
+        if (side === 'bank') state.selectedExceptionBank = r.rowId;
+        else state.selectedExceptionBo = r.rowId;
+        updateManualMatchButton();
+      });
+      var cbTd = el('td', 'checkbox-cell');
+      cbTd.appendChild(cb);
+      tr.appendChild(cbTd);
+
+      tr.appendChild(el('td', null, fmtDate(r.date)));
+      tr.appendChild(el('td', null, r.reference || '<em>-</em>'));
+      tr.appendChild(el('td', null, side === 'bank' ? (r.description || '') : (r.patronId || '')));
+      tr.appendChild(el('td', null, fmtMoney(r.amount)));
+
+      var actionTd = el('td');
+      var ignoreBtn = el('button', 'btn secondary small', 'Ignore');
+      ignoreBtn.addEventListener('click', function () { promptIgnore(side, r.rowId); });
+      actionTd.appendChild(ignoreBtn);
+      tr.appendChild(actionTd);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function updateManualMatchButton() {
+    var btn = document.getElementById('btn-manual-match');
+    btn.disabled = !(state.selectedExceptionBank && state.selectedExceptionBo);
+  }
+
+  document.getElementById('btn-manual-match').addEventListener('click', function () {
+    var channelKey = currentExceptionsChannel();
+    runServer('manualMatch', [channelKey, state.selectedExceptionBank, state.selectedExceptionBo], function () {
+      toast('Rows matched manually.', 'success');
+      loadExceptions();
+    });
+  });
+
+  function promptIgnore(side, rowId) {
+    var note = window.prompt('Reason for ignoring this row (e.g. bank fee, timing difference, known write-off):', '');
+    if (note === null) return;
+    var channelKey = currentExceptionsChannel();
+    runServer('ignoreException', [channelKey, side === 'bank' ? 'BANK' : 'BO', rowId, note], function () {
+      toast('Row marked as ignored.', 'success');
+      loadExceptions();
+    });
+  }
+
+  document.getElementById('btn-export-csv').addEventListener('click', function () {
+    var channelKey = currentExceptionsChannel();
+    if (!channelKey) { toast('Choose a channel first.', 'error'); return; }
+    runServer('exportChannelCsv', [channelKey], function (result) {
+      var blob = new Blob([result.csv], { type: 'text/csv;charset=utf-8;' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      toast('CSV downloaded.', 'success');
+    });
+  });
+
+  document.getElementById('btn-export-report').addEventListener('click', function () {
+    var channelKey = currentExceptionsChannel();
+    if (!channelKey) { toast('Choose a channel first.', 'error'); return; }
+    runServer('writeChannelReportSheet', [channelKey], function (result) {
+      toast('Report tab "' + result.sheetName + '" created in the data spreadsheet.', 'success');
+    });
+  });
+
+  // ================================================================== SETTINGS
+
+  function loadSettings() {
+    runServer('getChannels', [], function (channels) {
+      state.channels = channels;
+      renderSettingsTable(channels);
+      refreshChannelDropdowns();
+    });
+  }
+
+  function loadDiagnostics() {
+    runServer('getSetupDiagnostics', [], function (info) {
+      renderDiagnostics(info);
+    }, { loading: false });
+  }
+
+  function renderDiagnostics(info) {
+    var box = document.getElementById('diagnostics-info');
+    if (!info.ok) {
+      box.innerHTML =
+        '<div style="color:var(--red);font-weight:600">⚠ Setup failed with an error:</div>' +
+        '<div style="font-family:monospace;font-size:12px;background:#fce8e6;padding:8px;border-radius:6px;margin-top:6px">' +
+        (info.error || 'Unknown error') + '</div>' +
+        '<div style="margin-top:8px">This usually means the script has not been authorized yet, or the deployment\'s ' +
+        '"Execute as" setting needs to be "Me" rather than "User accessing the web app". ' +
+        'Click "Re-run Setup" below after checking Deploy &gt; Manage deployments in the Apps Script editor.</div>';
+      return;
+    }
+
+    var rows = [
+      ['Data spreadsheet', '<a href="' + info.spreadsheetUrl + '" target="_top">' + info.spreadsheetName + '</a>'],
+      ['Sheets found', info.sheetNames.join(', ')],
+      ['Rows in Config tab', String(info.configRowCount)],
+      ['Running as (active user)', info.activeUser],
+      ['Script owner (effective user)', info.effectiveUser]
+    ];
+
+    var html = '';
+    rows.forEach(function (r) {
+      html += '<div><strong>' + r[0] + ':</strong> ' + r[1] + '</div>';
+    });
+    if (info.configRowCount === 0) {
+      html += '<div style="color:var(--red);margin-top:8px;font-weight:600">⚠ The Config tab has 0 rows - ' +
+        'that\'s why no channels show up below. Click "Re-run Setup" to seed the default channels.</div>';
+    }
+    box.innerHTML = html;
+  }
+
+  document.getElementById('btn-run-diagnostics').addEventListener('click', loadDiagnostics);
+
+  document.getElementById('btn-reinit').addEventListener('click', function () {
+    runServer('initializeApp', [], function () {
+      toast('Setup ran successfully.', 'success');
+      loadDiagnostics();
+      loadSettings();
+    });
+  });
+
+  function renderSettingsTable(channels) {
+    var tbody = document.querySelector('#settings-table tbody');
+    tbody.innerHTML = '';
+
+    if (channels.length === 0) {
+      tbody.appendChild(el('tr', null,
+        '<td colspan="5" class="empty-state">No channels yet. Use "Re-run Setup" above to seed the defaults, or add one below.</td>'));
+      return;
+    }
+
+    channels.forEach(function (c) {
+      try {
+        var tr = el('tr');
+        tr.appendChild(el('td', null, c.displayName));
+
+        var daysInput = document.createElement('input');
+        daysInput.type = 'number'; daysInput.min = 0; daysInput.value = c.toleranceDays;
+        daysInput.style.width = '80px';
+        daysInput.addEventListener('change', function () {
+          runServer('updateChannel', [c.key, { toleranceDays: Number(daysInput.value) }], function () {
+            toast('Updated ' + c.displayName + '.', 'success');
+          }, { loading: false });
+        });
+        var daysTd = el('td'); daysTd.appendChild(daysInput); tr.appendChild(daysTd);
+
+        var amtInput = document.createElement('input');
+        amtInput.type = 'number'; amtInput.min = 0; amtInput.step = '0.01'; amtInput.value = c.amountTolerance;
+        amtInput.style.width = '90px';
+        amtInput.addEventListener('change', function () {
+          runServer('updateChannel', [c.key, { amountTolerance: Number(amtInput.value) }], function () {
+            toast('Updated ' + c.displayName + '.', 'success');
+          }, { loading: false });
+        });
+        var amtTd = el('td'); amtTd.appendChild(amtInput); tr.appendChild(amtTd);
+
+        var activeTd = el('td');
+        var activeBtn = el('button', 'btn small ' + (c.active ? 'success' : 'secondary'), c.active ? 'Active ✓' : 'Inactive');
+        activeBtn.title = c.active ? 'Click to deactivate this channel' : 'Click to activate this channel';
+        activeBtn.addEventListener('click', function () {
+          var newActive = !c.active;
+          runServer('updateChannel', [c.key, { active: newActive }], function () {
+            toast((newActive ? 'Activated ' : 'Deactivated ') + c.displayName + '.', 'success');
+            loadSettings();
+          });
+        });
+        activeTd.appendChild(activeBtn);
+        tr.appendChild(activeTd);
+
+        var actionTd = el('td');
+        var delBtn = el('button', 'btn danger small', 'Delete');
+        delBtn.addEventListener('click', function () {
+          if (!window.confirm('Delete channel "' + c.displayName + '"? This will NOT delete its imported data sheets - only the channel entry itself.')) return;
+          runServer('deleteChannel', [c.key, false], function () {
+            toast('Channel deleted.', 'success');
+            loadSettings();
+          });
+        });
+        actionTd.appendChild(delBtn);
+        tr.appendChild(actionTd);
+
+        tbody.appendChild(tr);
+      } catch (rowErr) {
+        // Never let one bad row silently blank the whole table - log it and keep going.
+        console.error('Failed to render channel row', c, rowErr);
+        tbody.appendChild(el('tr', null,
+          '<td colspan="5" class="empty-state">⚠ Could not render channel "' +
+          (c && c.displayName ? c.displayName : '?') + '" - see browser console for details.</td>'));
+      }
+    });
+  }
+
+  document.getElementById('btn-add-channel').addEventListener('click', function () {
+    var name = document.getElementById('new-channel-name').value.trim();
+    var days = Number(document.getElementById('new-channel-tolerance-days').value) || 1;
+    var amt = Number(document.getElementById('new-channel-tolerance-amount').value) || 0.01;
+    if (!name) { toast('Enter a channel name.', 'error'); return; }
+    runServer('addChannel', [name, days, amt], function () {
+      toast('Channel "' + name + '" added.', 'success');
+      document.getElementById('new-channel-name').value = '';
+      loadSettings();
+    });
+  });
+</script>

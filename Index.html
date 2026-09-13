@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('CSS'); ?>
+</head>
+<body>
+  <div id="app-shell">
+    <div id="sidebar">
+      <div class="brand">
+        <div class="brand-icon">🏦</div>
+        <div class="brand-text"><?= appTitle ?><small>Multi-channel reconciliation</small></div>
+      </div>
+
+      <div class="nav-item active" data-page="dashboard"><span class="nav-icon">📊</span> Dashboard</div>
+      <div class="nav-item" data-page="import"><span class="nav-icon">📥</span> Import Data</div>
+      <div class="nav-item" data-page="reconcile"><span class="nav-icon">🔄</span> Reconcile</div>
+      <div class="nav-item" data-page="exceptions"><span class="nav-icon">⚠️</span> Exceptions</div>
+      <div class="nav-item" data-page="settings"><span class="nav-icon">⚙️</span> Settings</div>
+
+      <div class="sidebar-footer">
+        Data store: <a href="#" id="open-sheet-link" target="_blank">open spreadsheet</a>
+      </div>
+    </div>
+
+    <div id="main">
+
+      <!-- ================= DASHBOARD ================= -->
+      <div class="page active" id="page-dashboard">
+        <div class="page-header">
+          <div>
+            <h1>Dashboard</h1>
+            <p>Overview of reconciliation status across every channel.</p>
+          </div>
+          <button class="btn secondary" id="btn-refresh-dashboard">↻ Refresh</button>
+        </div>
+
+        <div class="stat-grid" id="dashboard-stats"></div>
+
+        <div class="card">
+          <h3>Channels</h3>
+          <table id="dashboard-table">
+            <thead>
+              <tr>
+                <th>Channel</th><th>Bank Rows</th><th>Back-Office Rows</th><th>Matched</th>
+                <th>Unmatched</th><th>Match Rate</th><th>Last Run</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ================= IMPORT ================= -->
+      <div class="page" id="page-import">
+        <div class="page-header">
+          <div>
+            <h1>Import Data</h1>
+            <p>Upload a CSV export from a bank statement or a back-office / platform report.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="form-grid">
+            <div class="field">
+              <label>Channel</label>
+              <select id="import-channel"></select>
+            </div>
+            <div class="field">
+              <label>Data Source</label>
+              <div class="pill-select" id="import-side">
+                <div data-value="BANK" class="selected">Bank Statement</div>
+                <div data-value="BO">Back-Office / Platform</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>CSV File (include the header row)</label>
+            <div class="file-drop" id="import-file-drop">
+              <div class="file-drop-icon">📄</div>
+              <div class="file-drop-text"><strong>Click to upload</strong> or drag &amp; drop a .csv file here</div>
+              <div class="file-drop-filename" id="file-drop-filename">No file selected</div>
+              <input type="file" id="import-csv-file" accept=".csv,text/csv,.txt" hidden>
+            </div>
+            <div class="toolbar" id="file-drop-actions" style="margin-top:8px;margin-bottom:0">
+              <button class="btn secondary small hidden" id="btn-clear-file" type="button">✕ Remove file</button>
+            </div>
+            <details id="paste-fallback" style="margin-top:8px">
+              <summary>Paste CSV text instead</summary>
+              <textarea id="import-csv" placeholder="Date,Reference,Description,Deposit,Withdrawal&#10;2026-01-05,TXN001,Cash In,1500.00,0.00&#10;..."></textarea>
+            </details>
+          </div>
+
+          <div class="toolbar">
+            <button class="btn secondary" id="btn-preview-csv">Preview Columns</button>
+            <span id="import-preview-info" style="font-size:12.5px;color:var(--text-muted)"></span>
+          </div>
+
+          <div id="mapping-section" class="hidden">
+            <div class="sample-table-wrap">
+              <table id="sample-table"><thead></thead><tbody></tbody></table>
+            </div>
+
+            <div id="mapping-fields-bank" class="mapping-grid hidden">
+              <div class="field"><label>Date column</label><select data-map="dateCol"></select></div>
+              <div class="field"><label>Reference / Txn ID column</label><select data-map="refCol"></select></div>
+              <div class="field"><label>Description column (optional)</label><select data-map="descCol"></select></div>
+              <div class="field">
+                <label>Amount format</label>
+                <div class="pill-select" id="bank-amount-mode">
+                  <div data-value="single" class="selected">Single amount column (+/-)</div>
+                  <div data-value="split">Separate Deposit / Withdrawal</div>
+                </div>
+              </div>
+              <div class="field" id="bank-amount-single"><label>Amount column</label><select data-map="amountCol"></select></div>
+              <div class="field hidden" id="bank-amount-split-1"><label>Deposit column</label><select data-map="depositCol"></select></div>
+              <div class="field hidden" id="bank-amount-split-2"><label>Withdrawal column</label><select data-map="withdrawalCol"></select></div>
+            </div>
+
+            <div id="mapping-fields-bo" class="mapping-grid hidden">
+              <div class="field"><label>Date column</label><select data-map="dateCol"></select></div>
+              <div class="field"><label>Patron / Account Id column</label><select data-map="patronCol"></select></div>
+              <div class="field"><label>Transaction type column (optional)</label><select data-map="typeCol"></select></div>
+              <div class="field"><label>Reference / Correlation Id column</label><select data-map="refCol"></select></div>
+              <div class="field"><label>Secondary reference (optional, e.g. UW/FM Id)</label><select data-map="secondaryRefCol"></select></div>
+              <div class="field"><label>Amount column</label><select data-map="amountCol"></select></div>
+            </div>
+
+            <div class="toolbar">
+              <button class="btn success" id="btn-do-import">Import Rows</button>
+              <span id="import-result-info" style="font-size:12.5px;color:var(--text-muted)"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= RECONCILE ================= -->
+      <div class="page" id="page-reconcile">
+        <div class="page-header">
+          <div>
+            <h1>Reconcile</h1>
+            <p>Run the matching engine for a channel: reference match first, then amount + date match.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="form-grid">
+            <div class="field">
+              <label>Channel</label>
+              <select id="reconcile-channel"></select>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button class="btn" id="btn-run-reconciliation">▶ Run Reconciliation</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card hidden" id="reconcile-result-card">
+          <h3>Result</h3>
+          <div class="stat-grid" id="reconcile-result-stats"></div>
+          <div class="toolbar">
+            <button class="btn secondary" id="btn-goto-exceptions">View Exceptions →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= EXCEPTIONS ================= -->
+      <div class="page" id="page-exceptions">
+        <div class="page-header">
+          <div>
+            <h1>Exceptions</h1>
+            <p>Unmatched rows for a channel. Tick one bank row and one back-office row to manually match them.</p>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="field" style="min-width:260px;margin-bottom:0">
+            <select id="exceptions-channel"></select>
+          </div>
+          <button class="btn secondary small" id="btn-refresh-exceptions">↻ Refresh</button>
+          <div class="spacer"></div>
+          <button class="btn small" id="btn-manual-match" disabled>Match Selected Pair</button>
+          <button class="btn secondary small" id="btn-export-csv">⬇ Export CSV</button>
+          <button class="btn secondary small" id="btn-export-report">📄 Save Report Tab</button>
+        </div>
+
+        <div class="exceptions-columns">
+          <div class="card">
+            <h3>Unmatched Bank Rows</h3>
+            <table id="exceptions-bank-table">
+              <thead><tr><th class="checkbox-cell"></th><th>Date</th><th>Reference</th><th>Description</th><th>Amount</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-state hidden" id="exceptions-bank-empty"><div class="icon">✅</div>All bank rows are matched or resolved.</div>
+          </div>
+          <div class="card">
+            <h3>Unmatched Back-Office Rows</h3>
+            <table id="exceptions-bo-table">
+              <thead><tr><th class="checkbox-cell"></th><th>Date</th><th>Reference</th><th>Patron</th><th>Amount</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-state hidden" id="exceptions-bo-empty"><div class="icon">✅</div>All back-office rows are matched or resolved.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= SETTINGS ================= -->
+      <div class="page" id="page-settings">
+        <div class="page-header">
+          <div>
+            <h1>Settings</h1>
+            <p>Manage reconciliation channels and their matching tolerances.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Setup Diagnostics</h3>
+          <div id="diagnostics-info" style="font-size:13px;line-height:1.9"></div>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn secondary small" id="btn-run-diagnostics">↻ Refresh Diagnostics</button>
+            <button class="btn small" id="btn-reinit">🔧 Re-run Setup / Seed Default Channels</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Channels</h3>
+          <table id="settings-table">
+            <thead><tr><th>Channel</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>Add a New Channel</h3>
+          <div class="form-grid">
+            <div class="field"><label>Channel name</label><input type="text" id="new-channel-name" placeholder="e.g. PayMaya Instapay"></div>
+            <div class="field"><label>Date tolerance (days)</label><input type="number" id="new-channel-tolerance-days" value="1" min="0" step="1"></div>
+            <div class="field"><label>Amount tolerance</label><input type="number" id="new-channel-tolerance-amount" value="0.01" min="0" step="0.01"></div>
+            <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-channel">+ Add Channel</button></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="toast-container" id="toast-container"></div>
+  <div class="overlay-loading hidden" id="overlay-loading"><span class="spinner"></span>&nbsp;Working…</div>
+
+  <?!= include('JS'); ?>
+</body>
+</html>

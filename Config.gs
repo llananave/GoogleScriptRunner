@@ -44,7 +44,10 @@ function getChannels() {
       toleranceDays: Number(row.ToleranceDays) || 1,
       amountTolerance: Number(row.AmountTolerance) || 0.01,
       active: row.Active === true || row.Active === 'TRUE' || row.Active === 'true',
-      createdAt: row.CreatedAt,
+      // Never send a raw Date object across google.script.run inside an array
+      // of objects - it can fail to serialize and cause the WHOLE response to
+      // come back as null on the client, wiping out every channel at once.
+      createdAt: (row.CreatedAt instanceof Date) ? row.CreatedAt.toISOString() : (row.CreatedAt || null),
       _row: row._row
     };
   });

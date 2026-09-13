@@ -38,12 +38,17 @@ function getChannels() {
   var ss = getDataSpreadsheet();
   var sheet = ensureConfigSheet(ss);
   return readSheetAsObjects(sheet, CONFIG_COLS).map(function (row) {
+    var type = String(row.Type || '').trim().toUpperCase();
+    if ([CHANNEL_TYPE_BANK, CHANNEL_TYPE_BO, CHANNEL_TYPE_BOTH].indexOf(type) === -1) type = CHANNEL_TYPE_BOTH;
     return {
       key: row.ChannelKey,
       displayName: row.DisplayName,
       toleranceDays: Number(row.ToleranceDays) || 1,
       amountTolerance: Number(row.AmountTolerance) || 0.01,
       active: row.Active === true || row.Active === 'TRUE' || row.Active === 'true',
+      // Channels created before this feature existed have a blank Type cell -
+      // treated as BOTH, which is exactly their original (only) behavior.
+      type: type,
       // Never send a raw Date object across google.script.run inside an array
       // of objects - it can fail to serialize and cause the WHOLE response to
       // come back as null on the client, wiping out every channel at once.
@@ -66,11 +71,20 @@ function channelKeyExists(key) {
 }
 
 /**
- * Adds a new channel. Returns the created channel object.
+ * Adds a new channel. `type` is 'BANK', 'BO', or 'BOTH' (default 'BOTH' for
+ * backward compatibility with callers - like the default-channel seeder -
+ * that don't specify one). Only the sheet(s) implied by `type` are created:
+ * a 'BANK' channel gets just a BANK sheet, a 'BO' channel gets just a BO
+ * sheet, and 'BOTH' gets the classic paired sheets.
  */
-function addChannel(displayName, toleranceDays, amountTolerance) {
+function addChannel(displayName, toleranceDays, amountTolerance, type) {
   displayName = String(displayName || '').trim();
   if (!displayName) throw new Error('Channel name is required.');
+
+  type = String(type || CHANNEL_TYPE_BOTH).trim().toUpperCase();
+  if ([CHANNEL_TYPE_BANK, CHANNEL_TYPE_BO, CHANNEL_TYPE_BOTH].indexOf(type) === -1) {
+    throw new Error('Channel type must be Bank, Back Office, or Both.');
+  }
 
   var key = sanitizeChannelKey(displayName);
   if (!key) throw new Error('Channel name must contain at least one letter or number.');
@@ -84,13 +98,23 @@ function addChannel(displayName, toleranceDays, amountTolerance) {
     toleranceDays || 1,
     amountTolerance || 0.01,
     true,
-    new Date()
+    new Date(),
+    type
   ]);
 
-  ensureChannelSheets(key);
+  ensureChannelSheets(key, type);
   return getChannel(key);
 }
 
+/**
+ * Updates a channel's settings. Supported keys in `updates`:
+ *   toleranceDays, amountTolerance, active, displayName,
+ *   type ('BANK' | 'BO' | 'BOTH') - switching type will create any newly
+ *     required sheet automatically. If `deleteUnusedSide` is also true and
+ *     the change drops a side (e.g. BOTH -> BANK), that side's now-unused
+ *     sheet is deleted too - this is destructive, the client must confirm
+ *     with the user first.
+ */
 function updateChannel(channelKey, updates) {
   var ss = getDataSpreadsheet();
   var sheet = ensureConfigSheet(ss);
@@ -112,6 +136,32 @@ function updateChannel(channelKey, updates) {
   }
   if (updates.hasOwnProperty('displayName') && updates.displayName) {
     sheet.getRange(target._row, CONFIG_COLS.DisplayName).setValue(String(updates.displayName));
+  }
+  if (updates.hasOwnProperty('type')) {
+    var newType = String(updates.type || '').trim().toUpperCase();
+    if ([CHANNEL_TYPE_BANK, CHANNEL_TYPE_BO, CHANNEL_TYPE_BOTH].indexOf(newType) === -1) {
+      throw new Error('Channel type must be Bank, Back Office, or Both.');
+    }
+    var oldTypeRaw = String(target.Type || '').trim().toUpperCase();
+    var oldType = [CHANNEL_TYPE_BANK, CHANNEL_TYPE_BO, CHANNEL_TYPE_BOTH].indexOf(oldTypeRaw) === -1 ? CHANNEL_TYPE_BOTH : oldTypeRaw;
+
+    sheet.getRange(target._row, CONFIG_COLS.Type).setValue(newType);
+    ensureChannelSheets(channelKey, newType); // create any newly-needed side
+
+    if (updates.deleteUnusedSide) {
+      var droppedBank = (oldType === CHANNEL_TYPE_BANK || oldType === CHANNEL_TYPE_BOTH) &&
+        (newType === CHANNEL_TYPE_BO);
+      var droppedBo = (oldType === CHANNEL_TYPE_BO || oldType === CHANNEL_TYPE_BOTH) &&
+        (newType === CHANNEL_TYPE_BANK);
+      if (droppedBank) {
+        var bs = ss.getSheetByName(bankSheetName(channelKey));
+        if (bs) ss.deleteSheet(bs);
+      }
+      if (droppedBo) {
+        var bo = ss.getSheetByName(boSheetName(channelKey));
+        if (bo) ss.deleteSheet(bo);
+      }
+    }
   }
   return getChannel(channelKey);
 }
@@ -185,11 +235,10 @@ function findOrphanedChannelSheets() {
 }
 
 /**
- * Recreates Config rows for orphaned channel sheet pairs found by
- * findOrphanedChannelSheets(). Only relinks pairs that have BOTH a BANK and
- * a BO sheet, to avoid guessing at a display name / config for a half sheet.
- * New rows default to 1 day / 0.01 amount tolerance and Active = true;
- * adjust those afterwards in the Channels table if needed.
+ * Recreates Config rows for orphaned channel sheets found by
+ * findOrphanedChannelSheets(). A pair (both BANK and BO sheets present) is
+ * relinked as type BOTH; a lone sheet is relinked as type BANK or BO to
+ * match whichever side actually exists.
  */
 function relinkOrphanedChannels() {
   var ss = getDataSpreadsheet();
@@ -197,13 +246,12 @@ function relinkOrphanedChannels() {
   var orphans = findOrphanedChannelSheets();
   var now = new Date();
   var relinked = [];
-  var skippedIncomplete = [];
 
   orphans.forEach(function (o) {
-    if (!o.complete) { skippedIncomplete.push(o.key); return; }
-    sheet.appendRow([o.key, o.key, 1, 0.01, true, now]);
-    relinked.push(o.key);
+    var type = o.complete ? CHANNEL_TYPE_BOTH : (o.hasBank ? CHANNEL_TYPE_BANK : CHANNEL_TYPE_BO);
+    sheet.appendRow([o.key, o.key, 1, 0.01, true, now, type]);
+    relinked.push({ key: o.key, type: type });
   });
 
-  return { relinked: relinked, skippedIncomplete: skippedIncomplete };
+  return { relinked: relinked };
 }

@@ -35,6 +35,12 @@ function dateOf(row) {
 function runReconciliation(channelKey) {
   var channel = getChannel(channelKey);
   if (!channel) throw new Error('Unknown channel: ' + channelKey);
+  if (channel.type !== CHANNEL_TYPE_BOTH) {
+    throw new Error(
+      '"' + channel.displayName + '" is set up as ' + (channel.type === CHANNEL_TYPE_BANK ? 'Bank-only' : 'Back-Office-only') +
+      ', so there is no counterpart side on this channel to reconcile it against.'
+    );
+  }
 
   var sheets = ensureChannelSheets(channelKey);
   var bankSheet = sheets.bankSheet;
@@ -160,9 +166,10 @@ function applyStatusWrites(sheet, colsMap, writes) {
  * a channel, for the Exceptions tab.
  */
 function getExceptions(channelKey, includeIgnored) {
+  var channel = getChannel(channelKey);
   var sheets = ensureChannelSheets(channelKey);
-  var bankRows = readSheetAsObjects(sheets.bankSheet, BANK_COLS);
-  var boRows = readSheetAsObjects(sheets.boSheet, BO_COLS);
+  var bankRows = sheets.bankSheet ? readSheetAsObjects(sheets.bankSheet, BANK_COLS) : [];
+  var boRows = sheets.boSheet ? readSheetAsObjects(sheets.boSheet, BO_COLS) : [];
 
   function filterFn(r) {
     if (r.Status === STATUS_UNMATCHED || !r.Status) return true;
@@ -172,7 +179,8 @@ function getExceptions(channelKey, includeIgnored) {
 
   return {
     bank: bankRows.filter(filterFn).map(formatBankRowForClient),
-    bo: boRows.filter(filterFn).map(formatBoRowForClient)
+    bo: boRows.filter(filterFn).map(formatBoRowForClient),
+    channelType: channel ? channel.type : CHANNEL_TYPE_BOTH
   };
 }
 
@@ -220,6 +228,13 @@ function findRowById(sheet, colsMap, rowId) {
  * Manually pairs one bank row with one BO row (user-confirmed match).
  */
 function manualMatch(channelKey, bankRowId, boRowId) {
+  var channel = getChannel(channelKey);
+  if (channel && channel.type !== CHANNEL_TYPE_BOTH) {
+    throw new Error(
+      '"' + channel.displayName + '" is set up as ' + (channel.type === CHANNEL_TYPE_BANK ? 'Bank-only' : 'Back-Office-only') +
+      ', so it has no counterpart side to manually match against.'
+    );
+  }
   var sheets = ensureChannelSheets(channelKey);
   var bankRow = findRowById(sheets.bankSheet, BANK_COLS, bankRowId);
   var boRow = findRowById(sheets.boSheet, BO_COLS, boRowId);

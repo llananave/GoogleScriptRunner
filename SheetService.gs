@@ -9,8 +9,14 @@
 var CONFIG_SHEET_NAME = 'Config';
 var LOG_SHEET_NAME = 'Reconciliation_Log';
 
-var CONFIG_HEADERS = ['Channel Key', 'Display Name', 'Tolerance Days', 'Amount Tolerance', 'Active', 'Created At'];
-var CONFIG_COLS = { ChannelKey: 1, DisplayName: 2, ToleranceDays: 3, AmountTolerance: 4, Active: 5, CreatedAt: 6 };
+// "Type" is appended at the END of the existing columns (not inserted in the
+// middle) so pre-existing Config rows/sheets never shift and stay valid.
+var CONFIG_HEADERS = ['Channel Key', 'Display Name', 'Tolerance Days', 'Amount Tolerance', 'Active', 'Created At', 'Type'];
+var CONFIG_COLS = { ChannelKey: 1, DisplayName: 2, ToleranceDays: 3, AmountTolerance: 4, Active: 5, CreatedAt: 6, Type: 7 };
+
+var CHANNEL_TYPE_BANK = 'BANK';
+var CHANNEL_TYPE_BO = 'BO';
+var CHANNEL_TYPE_BOTH = 'BOTH';
 
 var LOG_HEADERS = ['Timestamp', 'Channel', 'Total Bank', 'Total Back-Office', 'Matched', 'Unmatched Bank', 'Unmatched Back-Office', 'Match Rate', 'Run By'];
 
@@ -119,6 +125,15 @@ function ensureConfigSheet(ss) {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, CONFIG_HEADERS.length).setFontWeight('bold').setBackground('#1a3c6e').setFontColor('#ffffff');
     sheet.autoResizeColumns(1, CONFIG_HEADERS.length);
+  } else {
+    // Migration: older Config sheets predate the "Type" column. Add the
+    // header in place if it's missing, without touching any existing data -
+    // existing rows simply read back as blank Type (treated as "BOTH").
+    var lastCol = sheet.getLastColumn();
+    var typeColIndex = CONFIG_COLS.Type;
+    if (lastCol < typeColIndex || String(sheet.getRange(1, typeColIndex).getValue()).trim() !== 'Type') {
+      sheet.getRange(1, typeColIndex).setValue('Type').setFontWeight('bold').setBackground('#1a3c6e').setFontColor('#ffffff');
+    }
   }
   return sheet;
 }
@@ -151,33 +166,64 @@ function boSheetName(channelKey) {
 }
 
 /**
- * Creates the BANK / BO sheets for a channel if they don't already exist.
+ * Creates the BANK and/or BO sheet(s) for a channel, based on its Type -
+ * only the side(s) that type actually needs are created.
+ *   - forceType, if given, is used directly (e.g. while creating a brand new
+ *     channel, before its Config row can be looked up).
+ *   - otherwise the channel's stored Type is looked up via getChannel();
+ *     an unknown/missing channel defaults to BOTH for backward compatibility
+ *     with every channel created before the Type column existed.
+ * Returns { bankSheet, boSheet } - a side's key is omitted if that side
+ * isn't part of the channel's type.
  */
-function ensureChannelSheets(channelKey) {
+function ensureChannelSheets(channelKey, forceType) {
   var ss = getDataSpreadsheet();
-  var bankSheet = ss.getSheetByName(bankSheetName(channelKey));
-  if (!bankSheet) {
-    bankSheet = ss.insertSheet(bankSheetName(channelKey));
-    bankSheet.appendRow(BANK_HEADERS);
-    bankSheet.setFrozenRows(1);
-    bankSheet.getRange(1, 1, 1, BANK_HEADERS.length).setFontWeight('bold').setBackground('#0b5394').setFontColor('#ffffff');
+  var type = forceType || ((getChannel(channelKey) || {}).type) || CHANNEL_TYPE_BOTH;
+  type = String(type).toUpperCase();
+
+  var wantBank = (type === CHANNEL_TYPE_BANK || type === CHANNEL_TYPE_BOTH);
+  var wantBo = (type === CHANNEL_TYPE_BO || type === CHANNEL_TYPE_BOTH);
+  var result = {};
+
+  if (wantBank) {
+    var bankSheet = ss.getSheetByName(bankSheetName(channelKey));
+    if (!bankSheet) {
+      bankSheet = ss.insertSheet(bankSheetName(channelKey));
+      bankSheet.appendRow(BANK_HEADERS);
+      bankSheet.setFrozenRows(1);
+      bankSheet.getRange(1, 1, 1, BANK_HEADERS.length).setFontWeight('bold').setBackground('#0b5394').setFontColor('#ffffff');
+    }
+    result.bankSheet = bankSheet;
   }
-  var boSheet = ss.getSheetByName(boSheetName(channelKey));
-  if (!boSheet) {
-    boSheet = ss.insertSheet(boSheetName(channelKey));
-    boSheet.appendRow(BO_HEADERS);
-    boSheet.setFrozenRows(1);
-    boSheet.getRange(1, 1, 1, BO_HEADERS.length).setFontWeight('bold').setBackground('#38761d').setFontColor('#ffffff');
+  if (wantBo) {
+    var boSheet = ss.getSheetByName(boSheetName(channelKey));
+    if (!boSheet) {
+      boSheet = ss.insertSheet(boSheetName(channelKey));
+      boSheet.appendRow(BO_HEADERS);
+      boSheet.setFrozenRows(1);
+      boSheet.getRange(1, 1, 1, BO_HEADERS.length).setFontWeight('bold').setBackground('#38761d').setFontColor('#ffffff');
+    }
+    result.boSheet = boSheet;
   }
-  return { bankSheet: bankSheet, boSheet: boSheet };
+  return result;
 }
 
 function getSheetForSide(channelKey, side) {
+  var channel = getChannel(channelKey);
+  var type = channel ? channel.type : CHANNEL_TYPE_BOTH;
+  var sideNeeded = side === SIDE_BANK ? CHANNEL_TYPE_BANK : CHANNEL_TYPE_BO;
+  if (type !== CHANNEL_TYPE_BOTH && type !== sideNeeded) {
+    var label = channel ? channel.displayName : channelKey;
+    throw new Error(
+      '"' + label + '" is set up as ' + (type === CHANNEL_TYPE_BANK ? 'Bank-only' : 'Back-Office-only') +
+      ' in Settings, so it has no ' + (sideNeeded === CHANNEL_TYPE_BANK ? 'Bank' : 'Back-Office') + ' sheet.'
+    );
+  }
   var ss = getDataSpreadsheet();
   var name = side === SIDE_BANK ? bankSheetName(channelKey) : boSheetName(channelKey);
   var sheet = ss.getSheetByName(name);
   if (!sheet) {
-    ensureChannelSheets(channelKey);
+    ensureChannelSheets(channelKey, type);
     sheet = ss.getSheetByName(name);
   }
   return sheet;

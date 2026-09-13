@@ -44,6 +44,7 @@ function getDashboardData() {
       key: ch.key,
       displayName: ch.displayName,
       active: ch.active,
+      type: ch.type,
       totalBank: counts.totalBank,
       totalBo: counts.totalBo,
       matched: counts.matched,

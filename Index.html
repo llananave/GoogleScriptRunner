@@ -43,7 +43,7 @@
           <table id="dashboard-table">
             <thead>
               <tr>
-                <th>Channel</th><th>Bank Rows</th><th>Back-Office Rows</th><th>Matched</th>
+                <th>Channel</th><th>Type</th><th>Bank Rows</th><th>Back-Office Rows</th><th>Matched</th>
                 <th>Unmatched</th><th>Match Rate</th><th>Last Run</th><th></th>
               </tr>
             </thead>
@@ -246,7 +246,7 @@
         <div class="card">
           <h3>Channels</h3>
           <table id="settings-table">
-            <thead><tr><th>Channel</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>
+            <thead><tr><th>Channel</th><th>Type</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -255,11 +255,25 @@
           <h3>Add a New Channel</h3>
           <div class="form-grid">
             <div class="field"><label>Channel name</label><input type="text" id="new-channel-name" placeholder="e.g. PayMaya Instapay"></div>
+            <div class="field">
+              <label>Channel type</label>
+              <div class="pill-select" id="new-channel-type">
+                <div data-value="BANK" class="selected">Bank only</div>
+                <div data-value="BO">Back-Office only</div>
+                <div data-value="BOTH">Both (paired)</div>
+              </div>
+            </div>
             <div class="field"><label>Date tolerance (days)</label><input type="number" id="new-channel-tolerance-days" value="1" min="0" step="1"></div>
             <div class="field"><label>Amount tolerance</label><input type="number" id="new-channel-tolerance-amount" value="0.01" min="0" step="0.01"></div>
             <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-channel">+ Add Channel</button></div>
           </div>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-top:10px;margin-bottom:0">
+            "Bank only" or "Back-Office only" creates just that one sheet - use this for channels that don't need automatic
+            per-channel reconciliation. "Both" creates the classic paired Bank + Back-Office sheets, which is required for
+            the Reconcile tab's automatic matching to work on this channel.
+          </p>
         </div>
+
       </div>
 
     </div>

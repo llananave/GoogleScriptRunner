@@ -121,31 +121,38 @@
   }
 
   function refreshChannelDropdowns(cb) {
-    var selects = [
-      document.getElementById('import-channel'),
-      document.getElementById('reconcile-channel'),
-      document.getElementById('exceptions-channel')
-    ];
     var activeChannels = state.channels.filter(function (c) { return c.active; });
+    // Automatic Bank<->Back-Office matching needs both sides on the SAME
+    // channel, so only "Both" channels are reconcilable; Bank-only /
+    // Back-Office-only channels are still importable and browsable in
+    // Exceptions, just not run through the Reconcile tab.
+    var reconcilableChannels = activeChannels.filter(function (c) { return c.type === 'BOTH'; });
 
-    selects.forEach(function (sel) {
+    var configs = [
+      { sel: document.getElementById('import-channel'), list: activeChannels, note: '' },
+      { sel: document.getElementById('reconcile-channel'), list: reconcilableChannels, note: ' with both Bank and Back-Office sides' },
+      { sel: document.getElementById('exceptions-channel'), list: activeChannels, note: '' }
+    ];
+
+    configs.forEach(function (cfg) {
+      var sel = cfg.sel;
       var prev = sel.value;
       sel.innerHTML = '';
 
-      if (activeChannels.length === 0) {
+      if (cfg.list.length === 0) {
         var placeholder = el(
           'option',
           null,
           state.channels.length === 0
             ? '— No channels found. Add one in Settings. —'
-            : '— No ACTIVE channels. Activate one in Settings. —'
+            : '— No ACTIVE channels' + cfg.note + '. —'
         );
         placeholder.value = '';
         placeholder.disabled = true;
         placeholder.selected = true;
         sel.appendChild(placeholder);
       } else {
-        activeChannels.forEach(function (c) {
+        cfg.list.forEach(function (c) {
           try {
             var opt = el('option', null, c.displayName);
             opt.value = c.key;
@@ -154,11 +161,42 @@
             console.error('Failed to render channel option', c, optErr);
           }
         });
-        if (prev && activeChannels.some(function (c) { return c.key === prev; })) sel.value = prev;
+        if (prev && cfg.list.some(function (c) { return c.key === prev; })) sel.value = prev;
       }
     });
+
+    syncImportSideToChannelType();
     if (cb) cb();
   }
+
+  /**
+   * Restricts the Import Data "Data Source" pill (Bank / Back-Office) to
+   * whichever side(s) the currently selected channel actually supports, and
+   * auto-switches the selection if it's no longer valid.
+   */
+  function syncImportSideToChannelType() {
+    var select = document.getElementById('import-channel');
+    var matches = state.channels.filter(function (c) { return c.key === select.value; });
+    var type = matches.length ? matches[0].type : 'BOTH';
+    var pill = document.getElementById('import-side');
+    var bankOpt = pill.querySelector('div[data-value="BANK"]');
+    var boOpt = pill.querySelector('div[data-value="BO"]');
+
+    bankOpt.style.display = (type === 'BO') ? 'none' : '';
+    boOpt.style.display = (type === 'BANK') ? 'none' : '';
+
+    var validValues = type === 'BANK' ? ['BANK'] : type === 'BO' ? ['BO'] : ['BANK', 'BO'];
+    if (validValues.indexOf(state.importSide) === -1) {
+      state.importSide = validValues[0];
+      pill.querySelectorAll('div').forEach(function (d) { d.classList.remove('selected'); });
+      (validValues[0] === 'BANK' ? bankOpt : boOpt).classList.add('selected');
+    }
+  }
+
+  document.getElementById('import-channel').addEventListener('change', function () {
+    syncImportSideToChannelType();
+    document.getElementById('mapping-section').classList.add('hidden');
+  });
 
   // ================================================================== DASHBOARD
 
@@ -192,12 +230,13 @@
     var tbody = document.querySelector('#dashboard-table tbody');
     tbody.innerHTML = '';
     if (channels.length === 0) {
-      tbody.appendChild(el('tr', null, '<td colspan="8" class="empty-state">No channels configured yet - add one in Settings.</td>'));
+      tbody.appendChild(el('tr', null, '<td colspan="9" class="empty-state">No channels configured yet - add one in Settings.</td>'));
       return;
     }
     channels.forEach(function (c) {
       var tr = el('tr');
       tr.appendChild(el('td', null, c.displayName + (c.active ? '' : ' <span class="badge inactive">inactive</span>')));
+      tr.appendChild(el('td', null, c.type === 'BANK' ? 'Bank only' : c.type === 'BO' ? 'Back-Office only' : 'Both'));
       tr.appendChild(el('td', null, c.totalBank));
       tr.appendChild(el('td', null, c.totalBo));
       tr.appendChild(el('td', null, c.matched));
@@ -217,12 +256,16 @@
       tr.appendChild(el('td', null, c.lastRun ? fmtDate(c.lastRun) : '<small style="color:var(--text-muted)">never</small>'));
 
       var actionTd = el('td');
-      var btn = el('button', 'btn secondary small', 'Reconcile');
-      btn.addEventListener('click', function () {
-        gotoPage('reconcile');
-        document.getElementById('reconcile-channel').value = c.key;
-      });
-      actionTd.appendChild(btn);
+      if (c.type === 'BOTH') {
+        var btn = el('button', 'btn secondary small', 'Reconcile');
+        btn.addEventListener('click', function () {
+          gotoPage('reconcile');
+          document.getElementById('reconcile-channel').value = c.key;
+        });
+        actionTd.appendChild(btn);
+      } else {
+        actionTd.innerHTML = '<small style="color:var(--text-muted)">n/a</small>';
+      }
       tr.appendChild(actionTd);
 
       tbody.appendChild(tr);
@@ -489,6 +532,14 @@
 
     runServer('getExceptions', [channelKey, false], function (data) {
       state.exceptionsCache = data;
+      var bankEmptyEl = document.getElementById('exceptions-bank-empty');
+      var boEmptyEl = document.getElementById('exceptions-bo-empty');
+      bankEmptyEl.innerHTML = data.channelType === 'BO'
+        ? '<div class="icon">ℹ️</div>This channel is set up as Back-Office only - it has no Bank side.'
+        : '<div class="icon">✅</div>All bank rows are matched or resolved.';
+      boEmptyEl.innerHTML = data.channelType === 'BANK'
+        ? '<div class="icon">ℹ️</div>This channel is set up as Bank only - it has no Back-Office side.'
+        : '<div class="icon">✅</div>All back-office rows are matched or resolved.';
       renderExceptionsTable('bank', data.bank);
       renderExceptionsTable('bo', data.bo);
     });
@@ -639,21 +690,15 @@
         info.lastOpenError + '</span>. If the spreadsheet above isn\'t the one you expect, use "Reconnect" below.</div>';
     }
 
-    var completeOrphans = (info.orphanedChannelSheets || []).filter(function (o) { return o.complete; });
-    var incompleteOrphans = (info.orphanedChannelSheets || []).filter(function (o) { return !o.complete; });
-    if (completeOrphans.length > 0) {
-      html += '<div style="color:var(--amber);margin-top:8px;font-weight:600">⚠ Found ' + completeOrphans.length +
-        ' channel data sheet pair(s) with NO matching Config row (likely deleted via "Delete channel" without deleting data): ' +
-        completeOrphans.map(function (o) { return o.key; }).join(', ') +
+    var orphans = info.orphanedChannelSheets || [];
+    if (orphans.length > 0) {
+      html += '<div style="color:var(--amber);margin-top:8px;font-weight:600">⚠ Found ' + orphans.length +
+        ' channel data sheet(s) with NO matching Config row (likely deleted via "Delete channel" without deleting data): ' +
+        orphans.map(function (o) { return o.key + (o.complete ? '' : ' (' + (o.hasBank ? 'Bank' : 'Back-Office') + '-only)'); }).join(', ') +
         '. Their imported data is untouched. Click "Relink Missing Channels" below to add them back to the dropdowns.</div>';
       relinkBtn.classList.remove('hidden');
     } else {
       relinkBtn.classList.add('hidden');
-    }
-    if (incompleteOrphans.length > 0) {
-      html += '<div style="color:var(--text-muted);margin-top:8px">Note: found a BANK or BO sheet with no matching pair and no ' +
-        'Config row for: ' + incompleteOrphans.map(function (o) { return o.key; }).join(', ') +
-        '. These were left alone since only one side of the pair exists.</div>';
     }
 
     box.innerHTML = html;
@@ -672,7 +717,8 @@
   document.getElementById('btn-relink-orphans').addEventListener('click', function () {
     runServer('relinkOrphanedChannels', [], function (result) {
       if (result.relinked.length > 0) {
-        toast('Relinked ' + result.relinked.length + ' channel(s): ' + result.relinked.join(', '), 'success');
+        toast('Relinked ' + result.relinked.length + ' channel(s): ' +
+          result.relinked.map(function (r) { return r.key + ' (' + r.type + ')'; }).join(', '), 'success');
       } else {
         toast('Nothing to relink.', 'error');
       }
@@ -700,7 +746,7 @@
 
     if (channels.length === 0) {
       tbody.appendChild(el('tr', null,
-        '<td colspan="5" class="empty-state">No channels yet. Use "Re-run Setup" above to seed the defaults, or add one below.</td>'));
+        '<td colspan="6" class="empty-state">No channels yet. Use "Re-run Setup" above to seed the defaults, or add one below.</td>'));
       return;
     }
 
@@ -708,6 +754,41 @@
       try {
         var tr = el('tr');
         tr.appendChild(el('td', null, c.displayName));
+
+        var typeTd = el('td');
+        var typeSelect = document.createElement('select');
+        typeSelect.style.width = '150px';
+        [['BANK', 'Bank only'], ['BO', 'Back-Office only'], ['BOTH', 'Both (paired)']].forEach(function (pair) {
+          var opt = document.createElement('option');
+          opt.value = pair[0]; opt.textContent = pair[1];
+          if (c.type === pair[0]) opt.selected = true;
+          typeSelect.appendChild(opt);
+        });
+        typeSelect.addEventListener('change', function () {
+          var newType = typeSelect.value;
+          if (newType === c.type) return;
+
+          var losingBank = (c.type === 'BANK' || c.type === 'BOTH') && newType === 'BO';
+          var losingBo = (c.type === 'BO' || c.type === 'BOTH') && newType === 'BANK';
+          var deleteUnusedSide = false;
+
+          if (losingBank || losingBo) {
+            deleteUnusedSide = window.confirm(
+              'Change "' + c.displayName + '" to ' + (newType === 'BANK' ? 'Bank only' : 'Back-Office only') + '?\n\n' +
+              'Click OK to ALSO permanently delete its now-unused ' + (losingBank ? 'Bank' : 'Back-Office') +
+              ' data sheet (cannot be undone).\n' +
+              'Click Cancel to just change the type and leave that sheet in place (it will simply stop being used by Import/Reconcile).'
+            );
+          }
+
+          runServer('updateChannel', [c.key, { type: newType, deleteUnusedSide: deleteUnusedSide }], function () {
+            toast('"' + c.displayName + '" is now ' + (newType === 'BANK' ? 'Bank only' : newType === 'BO' ? 'Back-Office only' : 'Both') + '.', 'success');
+            loadSettings();
+            loadChannels(loadDashboard);
+          }, { onError: function () { typeSelect.value = c.type; } });
+        });
+        typeTd.appendChild(typeSelect);
+        tr.appendChild(typeTd);
 
         var daysInput = document.createElement('input');
         daysInput.type = 'number'; daysInput.min = 0; daysInput.value = c.toleranceDays;
@@ -766,19 +847,29 @@
         // Never let one bad row silently blank the whole table - log it and keep going.
         console.error('Failed to render channel row', c, rowErr);
         tbody.appendChild(el('tr', null,
-          '<td colspan="5" class="empty-state">⚠ Could not render channel "' +
+          '<td colspan="6" class="empty-state">⚠ Could not render channel "' +
           (c && c.displayName ? c.displayName : '?') + '" - see browser console for details.</td>'));
       }
     });
   }
+
+  var newChannelType = 'BANK';
+  document.getElementById('new-channel-type').addEventListener('click', function (e) {
+    var target = e.target.closest('div[data-value]');
+    if (!target) return;
+    document.querySelectorAll('#new-channel-type div').forEach(function (d) { d.classList.remove('selected'); });
+    target.classList.add('selected');
+    newChannelType = target.getAttribute('data-value');
+  });
 
   document.getElementById('btn-add-channel').addEventListener('click', function () {
     var name = document.getElementById('new-channel-name').value.trim();
     var days = Number(document.getElementById('new-channel-tolerance-days').value) || 1;
     var amt = Number(document.getElementById('new-channel-tolerance-amount').value) || 0.01;
     if (!name) { toast('Enter a channel name.', 'error'); return; }
-    runServer('addChannel', [name, days, amt], function () {
-      toast('Channel "' + name + '" added.', 'success');
+    runServer('addChannel', [name, days, amt, newChannelType], function () {
+      toast('Channel "' + name + '" added (' +
+        (newChannelType === 'BANK' ? 'Bank only' : newChannelType === 'BO' ? 'Back-Office only' : 'Both') + ').', 'success');
       document.getElementById('new-channel-name').value = '';
       loadSettings();
     });

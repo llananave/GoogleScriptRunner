@@ -32,8 +32,8 @@ function exportChannelCsv(channelKey) {
   if (!channel) throw new Error('Unknown channel: ' + channelKey);
   var sheets = ensureChannelSheets(channelKey);
 
-  var bankRows = readSheetAsObjects(sheets.bankSheet, BANK_COLS);
-  var boRows = readSheetAsObjects(sheets.boSheet, BO_COLS);
+  var bankRows = sheets.bankSheet ? readSheetAsObjects(sheets.bankSheet, BANK_COLS) : [];
+  var boRows = sheets.boSheet ? readSheetAsObjects(sheets.boSheet, BO_COLS) : [];
 
   var headers = ['Side', 'Date', 'Reference', 'Secondary Ref / Patron', 'Description / Type', 'Amount', 'Status', 'Match Type', 'Match Id', 'Resolution Note'];
   var rows = [];
@@ -61,8 +61,8 @@ function writeChannelReportSheet(channelKey) {
   var ss = getDataSpreadsheet();
   var sheets = ensureChannelSheets(channelKey);
 
-  var bankRows = readSheetAsObjects(sheets.bankSheet, BANK_COLS);
-  var boRows = readSheetAsObjects(sheets.boSheet, BO_COLS);
+  var bankRows = sheets.bankSheet ? readSheetAsObjects(sheets.bankSheet, BANK_COLS) : [];
+  var boRows = sheets.boSheet ? readSheetAsObjects(sheets.boSheet, BO_COLS) : [];
   var matched = bankRows.filter(function (r) { return r.Status === STATUS_MATCHED; }).length;
   var unmatchedBank = bankRows.filter(function (r) { return r.Status === STATUS_UNMATCHED || !r.Status; }).length;
   var unmatchedBo = boRows.filter(function (r) { return r.Status === STATUS_UNMATCHED || !r.Status; }).length;

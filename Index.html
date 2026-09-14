@@ -43,7 +43,7 @@
           <table id="dashboard-table">
             <thead>
               <tr>
-                <th>Channel</th><th>Type</th><th>Bank Rows</th><th>Back-Office Rows</th><th>Matched</th>
+                <th>Channel</th><th>Type</th><th>Matches To</th><th>Bank Rows</th><th>Back-Office Rows</th><th>Matched</th>
                 <th>Unmatched</th><th>Match Rate</th><th>Last Run</th><th></th>
               </tr>
             </thead>
@@ -103,11 +103,13 @@
               <table id="sample-table"><thead></thead><tbody></tbody></table>
             </div>
 
-            <div id="mapping-fields-bank" class="mapping-grid hidden">
+            <p style="font-size:12.5px;color:var(--text-muted);margin:14px 0 4px">
+              <strong>Classified fields</strong> - always imported, and used by the matching engine.
+            </p>
+            <div id="mapping-fields-core" class="mapping-grid">
               <div class="field"><label>Date column</label><select data-map="dateCol"></select></div>
               <div class="field"><label>Reference / Txn ID column</label><select data-map="refCol"></select></div>
-              <div class="field"><label>Description column (optional)</label><select data-map="descCol"></select></div>
-              <div class="field">
+              <div class="field" id="bank-amount-mode-field">
                 <label>Amount format</label>
                 <div class="pill-select" id="bank-amount-mode">
                   <div data-value="single" class="selected">Single amount column (+/-)</div>
@@ -119,14 +121,12 @@
               <div class="field hidden" id="bank-amount-split-2"><label>Withdrawal column</label><select data-map="withdrawalCol"></select></div>
             </div>
 
-            <div id="mapping-fields-bo" class="mapping-grid hidden">
-              <div class="field"><label>Date column</label><select data-map="dateCol"></select></div>
-              <div class="field"><label>Patron / Account Id column</label><select data-map="patronCol"></select></div>
-              <div class="field"><label>Transaction type column (optional)</label><select data-map="typeCol"></select></div>
-              <div class="field"><label>Reference / Correlation Id column</label><select data-map="refCol"></select></div>
-              <div class="field"><label>Secondary reference (optional, e.g. UW/FM Id)</label><select data-map="secondaryRefCol"></select></div>
-              <div class="field"><label>Amount column</label><select data-map="amountCol"></select></div>
-            </div>
+            <p style="font-size:12.5px;color:var(--text-muted);margin:18px 0 4px">
+              <strong>Other columns to retain</strong> - optional. Anything left unchecked is excluded from the
+              import; anything checked is kept on the sheet under its original header text (informational only,
+              not used for matching).
+            </p>
+            <div id="extra-columns-list" class="checkbox-list"></div>
 
             <div class="toolbar">
               <button class="btn success" id="btn-do-import">Import Rows</button>
@@ -191,15 +191,15 @@
           <div class="card">
             <h3>Unmatched Bank Rows</h3>
             <table id="exceptions-bank-table">
-              <thead><tr><th class="checkbox-cell"></th><th>Date</th><th>Reference</th><th>Description</th><th>Amount</th><th></th></tr></thead>
+              <thead></thead>
               <tbody></tbody>
             </table>
             <div class="empty-state hidden" id="exceptions-bank-empty"><div class="icon">✅</div>All bank rows are matched or resolved.</div>
           </div>
           <div class="card">
-            <h3>Unmatched Back-Office Rows</h3>
+            <h3>Unmatched Back-Office Rows <small id="exceptions-bo-target" style="font-weight:400;color:var(--text-muted)"></small></h3>
             <table id="exceptions-bo-table">
-              <thead><tr><th class="checkbox-cell"></th><th>Date</th><th>Reference</th><th>Patron</th><th>Amount</th><th></th></tr></thead>
+              <thead></thead>
               <tbody></tbody>
             </table>
             <div class="empty-state hidden" id="exceptions-bo-empty"><div class="icon">✅</div>All back-office rows are matched or resolved.</div>
@@ -246,9 +246,14 @@
         <div class="card">
           <h3>Channels</h3>
           <table id="settings-table">
-            <thead><tr><th>Channel</th><th>Type</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>
+            <thead><tr><th>Channel</th><th>Type</th><th>Matches To (Back-Office)</th><th>Tolerance (days)</th><th>Amount Tolerance</th><th>Active</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-top:10px;margin-bottom:0">
+            "Matches To" picks which Back-Office channel a Bank (or Both) channel's Bank rows should reconcile
+            against - it doesn't have to be its own paired channel. Several Bank channels can point at the same
+            Back-Office channel.
+          </p>
         </div>
 
         <div class="card">
@@ -265,12 +270,17 @@
             </div>
             <div class="field"><label>Date tolerance (days)</label><input type="number" id="new-channel-tolerance-days" value="1" min="0" step="1"></div>
             <div class="field"><label>Amount tolerance</label><input type="number" id="new-channel-tolerance-amount" value="0.01" min="0" step="0.01"></div>
+            <div class="field" id="new-channel-match-target-field">
+              <label>Matches To (Back-Office)</label>
+              <select id="new-channel-match-target"></select>
+            </div>
             <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-channel">+ Add Channel</button></div>
           </div>
           <p style="font-size:12.5px;color:var(--text-muted);margin-top:10px;margin-bottom:0">
-            "Bank only" or "Back-Office only" creates just that one sheet - use this for channels that don't need automatic
-            per-channel reconciliation. "Both" creates the classic paired Bank + Back-Office sheets, which is required for
-            the Reconcile tab's automatic matching to work on this channel.
+            "Bank only" or "Back-Office only" creates just that one sheet; "Both" creates the classic paired
+            Bank + Back-Office sheets. Any Bank-capable channel (Bank only or Both) can reconcile automatically
+            once it has a Back-Office match target chosen above (or in the Channels table below) - it doesn't
+            have to be its own paired channel.
           </p>
         </div>
 

@@ -8,6 +8,12 @@
  *  sets (see the original inspiration workbook: UB Online, GCash, Maya and
  *  DragonPay exports all differ) so rather than hard-coding a layout per
  *  channel, the user maps columns once per channel and it is reusable.
+ *
+ *  Only Date, Reference and Amount are "classified" - required, and used by
+ *  the matching engine. Everything else in the source file is opt-in: the
+ *  user picks which additional columns to retain via `mapping.extraCols`,
+ *  and each one is kept under its ORIGINAL header text as an extra column on
+ *  the destination sheet (informational only, never used for matching).
  * ============================================================================
  */
 
@@ -62,12 +68,17 @@ function existingHashSet(sheet, colsMap) {
  * Imports pasted CSV text for a channel + side (BANK or BO) using the given
  * column mapping. Skips rows already imported (matched by content hash).
  *
- * mapping (BANK side):
- *   { dateCol, refCol, descCol, amountMode: 'single'|'split',
- *     amountCol, depositCol, withdrawalCol, signConvention: 'positiveDeposit'|'positiveWithdrawal' }
+ * mapping (both sides):
+ *   { dateCol, refCol,
+ *     amountMode: 'single'|'split', amountCol, depositCol, withdrawalCol,
+ *     extraCols: [sourceHeaderName, ...] }
  *
- * mapping (BO side):
- *   { dateCol, patronCol, typeCol, refCol, secondaryRefCol, amountCol }
+ * `amountMode`/`depositCol`/`withdrawalCol` only apply when computing the
+ * classified Amount for BANK rows (positive = deposit, negative =
+ * withdrawal); for BO rows amountCol is used directly. `extraCols` is the
+ * list of additional source columns (by header name, exactly as they appear
+ * in the uploaded file) the user chose to retain - kept under their original
+ * header text, informational only.
  */
 function importData(channelKey, side, csvText, mapping) {
   var channel = getChannel(channelKey);
@@ -87,75 +98,74 @@ function importData(channelKey, side, csvText, mapping) {
   var colsMap = side === SIDE_BANK ? BANK_COLS : BO_COLS;
   var seenHashes = existingHashSet(sheet, colsMap);
 
+  // Extra (opt-in, non-classified) columns the user chose to retain, kept
+  // under their original header text.
+  var extraCols = (mapping.extraCols || []).filter(function (h) { return headers.indexOf(h) !== -1; });
+  var extraColMap = ensureExtraColumns(sheet, colsMap, extraCols); // header -> 1-based sheet column
+  var fixedCount = Object.keys(colsMap).length;
+  var totalCols = Math.max(sheet.getLastColumn(), fixedCount);
+
   var newRows = [];
   var skipped = 0;
   var now = new Date();
 
-  if (side === SIDE_BANK) {
-    var dateIdx = idx(mapping.dateCol);
-    var refIdx = idx(mapping.refCol);
-    var descIdx = idx(mapping.descCol);
-    var amountIdx = idx(mapping.amountCol);
-    var depositIdx = idx(mapping.depositCol);
-    var withdrawalIdx = idx(mapping.withdrawalCol);
+  var dateIdx = idx(mapping.dateCol);
+  var refIdx = idx(mapping.refCol);
+  var amountIdx = idx(mapping.amountCol);
+  var depositIdx = idx(mapping.depositCol);
+  var withdrawalIdx = idx(mapping.withdrawalCol);
 
-    dataRows.forEach(function (r) {
-      if (r.join('') === '') return;
-      var date = dateIdx >= 0 ? parseDateValue(r[dateIdx]) : now;
-      var ref = refIdx >= 0 ? String(r[refIdx]).trim() : '';
-      var desc = descIdx >= 0 ? String(r[descIdx]).trim() : '';
-      var deposit = 0, withdrawal = 0;
+  dataRows.forEach(function (r) {
+    if (r.join('') === '') return;
+    var date = dateIdx >= 0 ? parseDateValue(r[dateIdx]) : now;
+    var ref = refIdx >= 0 ? String(r[refIdx]).trim() : '';
+    var amount;
 
-      if (mapping.amountMode === 'split') {
-        deposit = depositIdx >= 0 ? parseAmount(r[depositIdx]) : 0;
-        withdrawal = withdrawalIdx >= 0 ? parseAmount(r[withdrawalIdx]) : 0;
-      } else {
-        var amt = amountIdx >= 0 ? parseAmount(r[amountIdx]) : 0;
-        if (amt >= 0) { deposit = amt; } else { withdrawal = Math.abs(amt); }
-      }
+    if (side === SIDE_BANK && mapping.amountMode === 'split') {
+      var deposit = depositIdx >= 0 ? parseAmount(r[depositIdx]) : 0;
+      var withdrawal = withdrawalIdx >= 0 ? parseAmount(r[withdrawalIdx]) : 0;
+      amount = deposit - withdrawal;
+    } else {
+      amount = amountIdx >= 0 ? parseAmount(r[amountIdx]) : 0;
+    }
 
-      var amount = deposit - withdrawal;
-      var hash = computeSourceHash([channelKey, side, date.getTime(), ref, amount.toFixed(2), desc]);
-      if (seenHashes[hash]) { skipped++; return; }
-      seenHashes[hash] = true;
+    var hash = computeSourceHash([channelKey, side, date.getTime(), ref, amount.toFixed(2)]);
+    if (seenHashes[hash]) { skipped++; return; }
+    seenHashes[hash] = true;
 
-      var rowId = Utilities.getUuid();
-      newRows.push([rowId, date, ref, desc, deposit, withdrawal, amount, STATUS_UNMATCHED, '', '', '', now, hash]);
+    var rowId = Utilities.getUuid();
+    // Fixed columns first (Row Id, Date, Reference, Amount, Status, Match Id,
+    // Match Channel, Match Type, Resolution Note, Imported At, Source Hash),
+    // then extra columns in sheet-column order.
+    var row = new Array(totalCols).fill('');
+    row[colsMap.RowId - 1] = rowId;
+    row[colsMap.Date - 1] = date;
+    row[colsMap.Reference - 1] = ref;
+    row[colsMap.Amount - 1] = amount;
+    row[colsMap.Status - 1] = STATUS_UNMATCHED;
+    row[colsMap.ImportedAt - 1] = now;
+    row[colsMap.SourceHash - 1] = hash;
+
+    extraCols.forEach(function (header) {
+      var colIndex = extraColMap[header];
+      if (!colIndex) return;
+      var srcIdx = headers.indexOf(header);
+      if (srcIdx === -1) return;
+      row[colIndex - 1] = r[srcIdx];
     });
-  } else {
-    var dateIdx2 = idx(mapping.dateCol);
-    var patronIdx = idx(mapping.patronCol);
-    var typeIdx = idx(mapping.typeCol);
-    var refIdx2 = idx(mapping.refCol);
-    var secRefIdx = idx(mapping.secondaryRefCol);
-    var amountIdx2 = idx(mapping.amountCol);
 
-    dataRows.forEach(function (r) {
-      if (r.join('') === '') return;
-      var date = dateIdx2 >= 0 ? parseDateValue(r[dateIdx2]) : now;
-      var patron = patronIdx >= 0 ? String(r[patronIdx]).trim() : '';
-      var type = typeIdx >= 0 ? String(r[typeIdx]).trim() : '';
-      var ref = refIdx2 >= 0 ? String(r[refIdx2]).trim() : '';
-      var secRef = secRefIdx >= 0 ? String(r[secRefIdx]).trim() : '';
-      var amount = amountIdx2 >= 0 ? parseAmount(r[amountIdx2]) : 0;
-
-      var hash = computeSourceHash([channelKey, side, date.getTime(), ref, amount.toFixed(2), patron]);
-      if (seenHashes[hash]) { skipped++; return; }
-      seenHashes[hash] = true;
-
-      var rowId = Utilities.getUuid();
-      newRows.push([rowId, date, patron, type, ref, secRef, amount, STATUS_UNMATCHED, '', '', '', now, hash]);
-    });
-  }
+    newRows.push(row);
+  });
 
   if (newRows.length > 0) {
     var startRow = sheet.getLastRow() + 1;
-    sheet.getRange(startRow, 1, newRows.length, newRows[0].length).setValues(newRows);
+    sheet.getRange(startRow, 1, newRows.length, totalCols).setValues(newRows);
   }
 
   return {
     imported: newRows.length,
     skippedDuplicates: skipped,
-    totalRowsInFile: dataRows.length
+    totalRowsInFile: dataRows.length,
+    retainedColumns: extraCols
   };
 }

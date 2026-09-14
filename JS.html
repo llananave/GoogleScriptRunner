@@ -16,6 +16,44 @@
     importFileName: ''
   };
 
+  // Fixed classified columns consumed directly by the mapping form; anything
+  // else in the source file becomes an opt-in "extra column" checkbox.
+  function consumedHeadersForMapping() {
+    var consumed = [];
+    document.querySelectorAll('#mapping-fields-core select[data-map]').forEach(function (sel) {
+      if (sel.closest('.hidden')) return; // e.g. the split deposit/withdrawal fields when in single mode
+      if (sel.value) consumed.push(sel.value);
+    });
+    return consumed;
+  }
+
+  function renderExtraColumnsChecklist(headers) {
+    var container = document.getElementById('extra-columns-list');
+    container.innerHTML = '';
+    var consumed = consumedHeadersForMapping();
+    var remaining = headers.filter(function (h) { return h && consumed.indexOf(h) === -1; });
+    if (remaining.length === 0) {
+      container.appendChild(el('div', 'empty-hint', 'No other columns available to retain.'));
+      return;
+    }
+    remaining.forEach(function (h) {
+      var label = document.createElement('label');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = h;
+      cb.className = 'extra-col-checkbox';
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(h));
+      container.appendChild(label);
+    });
+  }
+
+  function refreshExtraColumnsChecklist() {
+    if (state.lastPreviewHeaders && state.lastPreviewHeaders.length) {
+      renderExtraColumnsChecklist(state.lastPreviewHeaders);
+    }
+  }
+
   // ---------------------------------------------------------------- helpers
 
   function showLoading(show) {
@@ -122,15 +160,18 @@
 
   function refreshChannelDropdowns(cb) {
     var activeChannels = state.channels.filter(function (c) { return c.active; });
-    // Automatic Bank<->Back-Office matching needs both sides on the SAME
-    // channel, so only "Both" channels are reconcilable; Bank-only /
-    // Back-Office-only channels are still importable and browsable in
-    // Exceptions, just not run through the Reconcile tab.
-    var reconcilableChannels = activeChannels.filter(function (c) { return c.type === 'BOTH'; });
+    // A channel is reconcilable once it has a Bank side AND a configured
+    // Back-Office match target (itself, by default, for "Both" channels, or
+    // any other Back-Office-capable channel chosen in Settings). Bank
+    // channels with no target yet, and Back-Office-only channels, are still
+    // importable and browsable in Exceptions, just not run through Reconcile.
+    var reconcilableChannels = activeChannels.filter(function (c) {
+      return (c.type === 'BANK' || c.type === 'BOTH') && !!c.matchTarget;
+    });
 
     var configs = [
       { sel: document.getElementById('import-channel'), list: activeChannels, note: '' },
-      { sel: document.getElementById('reconcile-channel'), list: reconcilableChannels, note: ' with both Bank and Back-Office sides' },
+      { sel: document.getElementById('reconcile-channel'), list: reconcilableChannels, note: ' with a Back-Office match target configured' },
       { sel: document.getElementById('exceptions-channel'), list: activeChannels, note: '' }
     ];
 
@@ -230,13 +271,14 @@
     var tbody = document.querySelector('#dashboard-table tbody');
     tbody.innerHTML = '';
     if (channels.length === 0) {
-      tbody.appendChild(el('tr', null, '<td colspan="9" class="empty-state">No channels configured yet - add one in Settings.</td>'));
+      tbody.appendChild(el('tr', null, '<td colspan="10" class="empty-state">No channels configured yet - add one in Settings.</td>'));
       return;
     }
     channels.forEach(function (c) {
       var tr = el('tr');
       tr.appendChild(el('td', null, c.displayName + (c.active ? '' : ' <span class="badge inactive">inactive</span>')));
       tr.appendChild(el('td', null, c.type === 'BANK' ? 'Bank only' : c.type === 'BO' ? 'Back-Office only' : 'Both'));
+      tr.appendChild(el('td', null, c.matchesTo || '<small style="color:var(--text-muted)">—</small>'));
       tr.appendChild(el('td', null, c.totalBank));
       tr.appendChild(el('td', null, c.totalBo));
       tr.appendChild(el('td', null, c.matched));
@@ -256,7 +298,7 @@
       tr.appendChild(el('td', null, c.lastRun ? fmtDate(c.lastRun) : '<small style="color:var(--text-muted)">never</small>'));
 
       var actionTd = el('td');
-      if (c.type === 'BOTH') {
+      if ((c.type === 'BANK' || c.type === 'BOTH') && c.matchesTo) {
         var btn = el('button', 'btn secondary small', 'Reconcile');
         btn.addEventListener('click', function () {
           gotoPage('reconcile');
@@ -295,6 +337,7 @@
     document.getElementById('bank-amount-single').classList.toggle('hidden', !single);
     document.getElementById('bank-amount-split-1').classList.toggle('hidden', single);
     document.getElementById('bank-amount-split-2').classList.toggle('hidden', single);
+    refreshExtraColumnsChecklist();
   });
 
   // ------------------------------------------------------ file upload / drop
@@ -431,32 +474,39 @@
 
   function renderMappingFields(headers) {
     var isBank = state.importSide === 'BANK';
-    document.getElementById('mapping-fields-bank').classList.toggle('hidden', !isBank);
-    document.getElementById('mapping-fields-bo').classList.toggle('hidden', isBank);
+    // Amount split/single mode only makes sense for Bank statements; a
+    // Back-Office export always has one signed (or unsigned) amount column.
+    document.getElementById('bank-amount-mode-field').classList.toggle('hidden', !isBank);
+    if (!isBank) {
+      state.bankAmountMode = 'single';
+      document.querySelectorAll('#bank-amount-mode div').forEach(function (d) {
+        d.classList.toggle('selected', d.getAttribute('data-value') === 'single');
+      });
+      document.getElementById('bank-amount-single').classList.remove('hidden');
+      document.getElementById('bank-amount-split-1').classList.add('hidden');
+      document.getElementById('bank-amount-split-2').classList.add('hidden');
+    }
 
-    var containerId = isBank ? 'mapping-fields-bank' : 'mapping-fields-bo';
-    var selects = document.querySelectorAll('#' + containerId + ' select[data-map]');
+    var selects = document.querySelectorAll('#mapping-fields-core select[data-map]');
     selects.forEach(function (sel) {
       var field = sel.getAttribute('data-map');
-      var allowBlank = ['descCol', 'typeCol', 'secondaryRefCol'].indexOf(field) !== -1;
-      populateColumnSelect(sel, headers, allowBlank);
+      populateColumnSelect(sel, headers, false);
 
       var guesses = {
         dateCol: ['date', 'time'],
         refCol: ['reference', 'ref', 'trxn', 'txnid', 'transaction code', 'transaction id', 'rrn', 'correlation'],
-        descCol: ['description', 'remarks', 'merchant', 'msg'],
         amountCol: ['amount'],
         depositCol: ['deposit', 'credit'],
-        withdrawalCol: ['withdrawal', 'debit'],
-        patronCol: ['patron', 'player', 'buyer', 'account', 'userid'],
-        typeCol: ['type', 'txntype', 'transaction type'],
-        secondaryRefCol: ['uw', 'fm id', 'txnid', 'extrefid']
+        withdrawalCol: ['withdrawal', 'debit']
       };
       if (guesses[field]) {
         var guess = guessColumn(headers, guesses[field]);
         if (guess) sel.value = guess;
       }
+      sel.addEventListener('change', refreshExtraColumnsChecklist);
     });
+
+    renderExtraColumnsChecklist(headers);
   }
 
   document.getElementById('btn-do-import').addEventListener('click', function () {
@@ -464,16 +514,20 @@
     if (!channelKey) { toast('Choose a channel first.', 'error'); return; }
     var csv = getImportCsvText();
     if (!csv) { toast('Upload a CSV file (or paste CSV text) first.', 'error'); return; }
-    var isBank = state.importSide === 'BANK';
-    var containerId = isBank ? 'mapping-fields-bank' : 'mapping-fields-bo';
-    var mapping = { amountMode: state.bankAmountMode };
-    document.querySelectorAll('#' + containerId + ' select[data-map]').forEach(function (sel) {
+    var mapping = { amountMode: state.bankAmountMode, extraCols: [] };
+    document.querySelectorAll('#mapping-fields-core select[data-map]').forEach(function (sel) {
       mapping[sel.getAttribute('data-map')] = sel.value;
     });
+    document.querySelectorAll('#extra-columns-list .extra-col-checkbox:checked').forEach(function (cb) {
+      mapping.extraCols.push(cb.value);
+    });
+    if (!mapping.dateCol || !mapping.refCol) { toast('Choose the Date and Reference columns first.', 'error'); return; }
+    if (state.bankAmountMode === 'single' && !mapping.amountCol) { toast('Choose the Amount column first.', 'error'); return; }
 
     runServer('importData', [channelKey, state.importSide, csv, mapping], function (result) {
       document.getElementById('import-result-info').textContent =
-        'Imported ' + result.imported + ' new row(s), skipped ' + result.skippedDuplicates + ' duplicate(s) out of ' + result.totalRowsInFile + ' total.';
+        'Imported ' + result.imported + ' new row(s), skipped ' + result.skippedDuplicates + ' duplicate(s) out of ' + result.totalRowsInFile + ' total.' +
+        (result.retainedColumns && result.retainedColumns.length ? ' Retained columns: ' + result.retainedColumns.join(', ') + '.' : '');
       toast('Import complete: ' + result.imported + ' new row(s) added.', 'success');
       document.getElementById('btn-clear-file').click();
     });
@@ -537,15 +591,30 @@
       bankEmptyEl.innerHTML = data.channelType === 'BO'
         ? '<div class="icon">ℹ️</div>This channel is set up as Back-Office only - it has no Bank side.'
         : '<div class="icon">✅</div>All bank rows are matched or resolved.';
-      boEmptyEl.innerHTML = data.channelType === 'BANK'
-        ? '<div class="icon">ℹ️</div>This channel is set up as Bank only - it has no Back-Office side.'
+      boEmptyEl.innerHTML = data.channelType === 'BANK' && !data.boChannelName
+        ? '<div class="icon">ℹ️</div>This channel has no Back-Office match target configured yet - set one in Settings.'
         : '<div class="icon">✅</div>All back-office rows are matched or resolved.';
-      renderExceptionsTable('bank', data.bank);
-      renderExceptionsTable('bo', data.bo);
+      document.getElementById('exceptions-bo-target').textContent = data.boChannelName ? '(' + data.boChannelName + ')' : '';
+      renderExceptionsTable('bank', data.bank, data.bankExtraHeaders || []);
+      renderExceptionsTable('bo', data.bo, data.boExtraHeaders || []);
     });
   }
 
-  function renderExceptionsTable(side, rows) {
+  function renderExceptionsTableHead(side, extraHeaders) {
+    var thead = document.querySelector('#exceptions-' + side + '-table thead');
+    thead.innerHTML = '';
+    var tr = el('tr');
+    tr.appendChild(el('th', 'checkbox-cell'));
+    tr.appendChild(el('th', null, 'Date'));
+    tr.appendChild(el('th', null, 'Reference'));
+    tr.appendChild(el('th', null, 'Amount'));
+    extraHeaders.forEach(function (h) { tr.appendChild(el('th', null, h)); });
+    tr.appendChild(el('th', null, ''));
+    thead.appendChild(tr);
+  }
+
+  function renderExceptionsTable(side, rows, extraHeaders) {
+    renderExceptionsTableHead(side, extraHeaders);
     var tbody = document.querySelector('#exceptions-' + side + '-table tbody');
     var emptyEl = document.getElementById('exceptions-' + side + '-empty');
     tbody.innerHTML = '';
@@ -568,8 +637,12 @@
 
       tr.appendChild(el('td', null, fmtDate(r.date)));
       tr.appendChild(el('td', null, r.reference || '<em>-</em>'));
-      tr.appendChild(el('td', null, side === 'bank' ? (r.description || '') : (r.patronId || '')));
       tr.appendChild(el('td', null, fmtMoney(r.amount)));
+
+      extraHeaders.forEach(function (h) {
+        var v = r.extra && r.extra[h] !== undefined ? r.extra[h] : '';
+        tr.appendChild(el('td', null, v === null || v === undefined ? '' : String(v)));
+      });
 
       var actionTd = el('td');
       var ignoreBtn = el('button', 'btn secondary small', 'Ignore');
@@ -636,6 +709,7 @@
       state.channels = channels;
       renderSettingsTable(channels);
       refreshChannelDropdowns();
+      refreshNewChannelMatchTargetOptions();
     });
   }
 
@@ -746,7 +820,7 @@
 
     if (channels.length === 0) {
       tbody.appendChild(el('tr', null,
-        '<td colspan="6" class="empty-state">No channels yet. Use "Re-run Setup" above to seed the defaults, or add one below.</td>'));
+        '<td colspan="7" class="empty-state">No channels yet. Use "Re-run Setup" above to seed the defaults, or add one below.</td>'));
       return;
     }
 
@@ -789,6 +863,35 @@
         });
         typeTd.appendChild(typeSelect);
         tr.appendChild(typeTd);
+
+        var targetTd = el('td');
+        if (c.type === 'BO') {
+          targetTd.innerHTML = '<small style="color:var(--text-muted)">n/a - this channel is itself a Back-Office target</small>';
+        } else {
+          var targetSelect = document.createElement('select');
+          targetSelect.style.width = '190px';
+          var boOptions = state.channels.filter(function (ch) { return ch.type === 'BO' || ch.type === 'BOTH'; });
+          var noneOpt = document.createElement('option');
+          noneOpt.value = ''; noneOpt.textContent = '— Not configured —';
+          targetSelect.appendChild(noneOpt);
+          boOptions.forEach(function (ch) {
+            var opt = document.createElement('option');
+            opt.value = ch.key;
+            opt.textContent = ch.displayName + (ch.key === c.key ? ' (itself)' : '');
+            if (c.matchTarget === ch.key) opt.selected = true;
+            targetSelect.appendChild(opt);
+          });
+          targetSelect.addEventListener('change', function () {
+            var newTarget = targetSelect.value;
+            runServer('updateChannel', [c.key, { matchTarget: newTarget }], function () {
+              toast('Updated match target for "' + c.displayName + '".', 'success');
+              loadSettings();
+              loadChannels(loadDashboard);
+            }, { onError: function () { targetSelect.value = c.matchTarget || ''; } });
+          });
+          targetTd.appendChild(targetSelect);
+        }
+        tr.appendChild(targetTd);
 
         var daysInput = document.createElement('input');
         daysInput.type = 'number'; daysInput.min = 0; daysInput.value = c.toleranceDays;
@@ -847,27 +950,52 @@
         // Never let one bad row silently blank the whole table - log it and keep going.
         console.error('Failed to render channel row', c, rowErr);
         tbody.appendChild(el('tr', null,
-          '<td colspan="6" class="empty-state">⚠ Could not render channel "' +
+          '<td colspan="7" class="empty-state">⚠ Could not render channel "' +
           (c && c.displayName ? c.displayName : '?') + '" - see browser console for details.</td>'));
       }
     });
   }
 
   var newChannelType = 'BANK';
+
+  function refreshNewChannelMatchTargetOptions() {
+    var field = document.getElementById('new-channel-match-target-field');
+    var select = document.getElementById('new-channel-match-target');
+    if (newChannelType === 'BO') {
+      field.classList.add('hidden');
+      return;
+    }
+    field.classList.remove('hidden');
+    var prev = select.value;
+    select.innerHTML = '';
+    var noneOpt = document.createElement('option');
+    noneOpt.value = ''; noneOpt.textContent = newChannelType === 'BOTH' ? '— Itself (default) —' : '— Not configured yet —';
+    select.appendChild(noneOpt);
+    state.channels.filter(function (ch) { return ch.type === 'BO' || ch.type === 'BOTH'; }).forEach(function (ch) {
+      var opt = document.createElement('option');
+      opt.value = ch.key;
+      opt.textContent = ch.displayName;
+      select.appendChild(opt);
+    });
+    if (prev && Array.prototype.some.call(select.options, function (o) { return o.value === prev; })) select.value = prev;
+  }
+
   document.getElementById('new-channel-type').addEventListener('click', function (e) {
     var target = e.target.closest('div[data-value]');
     if (!target) return;
     document.querySelectorAll('#new-channel-type div').forEach(function (d) { d.classList.remove('selected'); });
     target.classList.add('selected');
     newChannelType = target.getAttribute('data-value');
+    refreshNewChannelMatchTargetOptions();
   });
 
   document.getElementById('btn-add-channel').addEventListener('click', function () {
     var name = document.getElementById('new-channel-name').value.trim();
     var days = Number(document.getElementById('new-channel-tolerance-days').value) || 1;
     var amt = Number(document.getElementById('new-channel-tolerance-amount').value) || 0.01;
+    var matchTarget = document.getElementById('new-channel-match-target').value;
     if (!name) { toast('Enter a channel name.', 'error'); return; }
-    runServer('addChannel', [name, days, amt, newChannelType], function () {
+    runServer('addChannel', [name, days, amt, newChannelType, matchTarget], function () {
       toast('Channel "' + name + '" added (' +
         (newChannelType === 'BANK' ? 'Bank only' : newChannelType === 'BO' ? 'Back-Office only' : 'Both') + ').', 'success');
       document.getElementById('new-channel-name').value = '';

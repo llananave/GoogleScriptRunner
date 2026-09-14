@@ -3,16 +3,27 @@
  *  SheetService.gs
  *  Creates / opens the backing Google Sheet that stores all reconciliation
  *  data, and provides low-level helpers for reading & writing rows.
+ *
+ *  SCHEMA NOTE (column customization):
+ *  Every BANK / BO sheet has a small set of FIXED "classified" columns that
+ *  the app relies on (Row Id, Date, Reference, Amount, Status, plus internal
+ *  bookkeeping like Match Id / Match Channel / Match Type / Resolution Note /
+ *  Imported At / Source Hash). Everything else is an "extra" column: any
+ *  additional source column the user chose to retain at import time, kept
+ *  under its ORIGINAL header text, appended after the fixed columns. Extra
+ *  columns are purely informational - they display in Exceptions/Export but
+ *  are never used for matching.
  * ============================================================================
  */
 
 var CONFIG_SHEET_NAME = 'Config';
 var LOG_SHEET_NAME = 'Reconciliation_Log';
 
-// "Type" is appended at the END of the existing columns (not inserted in the
-// middle) so pre-existing Config rows/sheets never shift and stay valid.
-var CONFIG_HEADERS = ['Channel Key', 'Display Name', 'Tolerance Days', 'Amount Tolerance', 'Active', 'Created At', 'Type'];
-var CONFIG_COLS = { ChannelKey: 1, DisplayName: 2, ToleranceDays: 3, AmountTolerance: 4, Active: 5, CreatedAt: 6, Type: 7 };
+// "Type" and "Match Target" are appended at the END of the existing columns
+// (not inserted in the middle) so pre-existing Config rows/sheets never
+// shift and stay valid.
+var CONFIG_HEADERS = ['Channel Key', 'Display Name', 'Tolerance Days', 'Amount Tolerance', 'Active', 'Created At', 'Type', 'Match Target'];
+var CONFIG_COLS = { ChannelKey: 1, DisplayName: 2, ToleranceDays: 3, AmountTolerance: 4, Active: 5, CreatedAt: 6, Type: 7, MatchTarget: 8 };
 
 var CHANNEL_TYPE_BANK = 'BANK';
 var CHANNEL_TYPE_BO = 'BO';
@@ -20,11 +31,23 @@ var CHANNEL_TYPE_BOTH = 'BOTH';
 
 var LOG_HEADERS = ['Timestamp', 'Channel', 'Total Bank', 'Total Back-Office', 'Matched', 'Unmatched Bank', 'Unmatched Back-Office', 'Match Rate', 'Run By'];
 
-var BANK_HEADERS = ['Row Id', 'Date', 'Reference', 'Description', 'Deposit', 'Withdrawal', 'Amount', 'Status', 'Match Id', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
-var BANK_COLS = { RowId: 1, Date: 2, Reference: 3, Description: 4, Deposit: 5, Withdrawal: 6, Amount: 7, Status: 8, MatchId: 9, MatchType: 10, ResolutionNote: 11, ImportedAt: 12, SourceHash: 13 };
+// ---- Fixed / classified columns -------------------------------------------
+// Date, Reference, Amount and Status are the "default classified fields"
+// every BANK/BO sheet always has. Row Id / Match Id / Match Channel /
+// Match Type / Resolution Note / Imported At / Source Hash are internal
+// bookkeeping columns the app needs regardless of what the user chooses to
+// retain from their source file.
+var BANK_HEADERS = ['Row Id', 'Date', 'Reference', 'Amount', 'Status', 'Match Id', 'Match Channel', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
+var BANK_COLS = { RowId: 1, Date: 2, Reference: 3, Amount: 4, Status: 5, MatchId: 6, MatchChannel: 7, MatchType: 8, ResolutionNote: 9, ImportedAt: 10, SourceHash: 11 };
 
-var BO_HEADERS = ['Row Id', 'Date', 'Patron / Account Id', 'Txn Type', 'Reference', 'Secondary Reference', 'Amount', 'Status', 'Match Id', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
-var BO_COLS = { RowId: 1, Date: 2, PatronId: 3, TxnType: 4, Reference: 5, SecondaryReference: 6, Amount: 7, Status: 8, MatchId: 9, MatchType: 10, ResolutionNote: 11, ImportedAt: 12, SourceHash: 13 };
+var BO_HEADERS = ['Row Id', 'Date', 'Reference', 'Amount', 'Status', 'Match Id', 'Match Channel', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
+var BO_COLS = { RowId: 1, Date: 2, Reference: 3, Amount: 4, Status: 5, MatchId: 6, MatchChannel: 7, MatchType: 8, ResolutionNote: 9, ImportedAt: 10, SourceHash: 11 };
+
+// Legacy (pre-column-customization) layouts, kept only so old sheets can be
+// migrated in place the first time they're touched - see
+// migrateLegacyChannelSheet() below. Not used anywhere else.
+var LEGACY_BANK_HEADERS = ['Row Id', 'Date', 'Reference', 'Description', 'Deposit', 'Withdrawal', 'Amount', 'Status', 'Match Id', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
+var LEGACY_BO_HEADERS = ['Row Id', 'Date', 'Patron / Account Id', 'Txn Type', 'Reference', 'Secondary Reference', 'Amount', 'Status', 'Match Id', 'Match Type', 'Resolution Note', 'Imported At', 'Source Hash'];
 
 var STATUS_MATCHED = 'Matched';
 var STATUS_UNMATCHED = 'Unmatched';
@@ -126,14 +149,17 @@ function ensureConfigSheet(ss) {
     sheet.getRange(1, 1, 1, CONFIG_HEADERS.length).setFontWeight('bold').setBackground('#1a3c6e').setFontColor('#ffffff');
     sheet.autoResizeColumns(1, CONFIG_HEADERS.length);
   } else {
-    // Migration: older Config sheets predate the "Type" column. Add the
-    // header in place if it's missing, without touching any existing data -
-    // existing rows simply read back as blank Type (treated as "BOTH").
-    var lastCol = sheet.getLastColumn();
-    var typeColIndex = CONFIG_COLS.Type;
-    if (lastCol < typeColIndex || String(sheet.getRange(1, typeColIndex).getValue()).trim() !== 'Type') {
-      sheet.getRange(1, typeColIndex).setValue('Type').setFontWeight('bold').setBackground('#1a3c6e').setFontColor('#ffffff');
-    }
+    // Migration: older Config sheets predate the "Type" / "Match Target"
+    // columns. Add any missing header in place, without touching any
+    // existing data - existing rows simply read back as blank (Type treated
+    // as "BOTH", Match Target treated as "not yet configured").
+    [CONFIG_COLS.Type, CONFIG_COLS.MatchTarget].forEach(function (colIndex) {
+      var expectedHeader = CONFIG_HEADERS[colIndex - 1];
+      var lastCol = sheet.getLastColumn();
+      if (lastCol < colIndex || String(sheet.getRange(1, colIndex).getValue()).trim() !== expectedHeader) {
+        sheet.getRange(1, colIndex).setValue(expectedHeader).setFontWeight('bold').setBackground('#1a3c6e').setFontColor('#ffffff');
+      }
+    });
   }
   return sheet;
 }
@@ -166,6 +192,71 @@ function boSheetName(channelKey) {
 }
 
 /**
+ * If `sheet` still has the pre-column-customization layout (fixed
+ * Description/Deposit/Withdrawal or Patron/TxnType/SecondaryReference
+ * columns), rewrites it in place to the new fixed schema (Row Id, Date,
+ * Reference, Amount, Status, ...bookkeeping...) and moves the old classified
+ * columns to the end as "extra" columns under their original headers, so no
+ * historical data is lost. Safe to call repeatedly - it's a no-op once a
+ * sheet is already on the new layout (whether freshly created or already
+ * migrated).
+ */
+function migrateLegacyChannelSheet(sheet, side) {
+  if (!sheet || sheet.getLastRow() < 1) return;
+  var legacyHeaders = side === SIDE_BANK ? LEGACY_BANK_HEADERS : LEGACY_BO_HEADERS;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol < legacyHeaders.length) return; // too narrow to be the legacy layout
+
+  var currentHeaders = sheet.getRange(1, 1, 1, legacyHeaders.length).getValues()[0].map(function (h) { return String(h).trim(); });
+  var isLegacy = legacyHeaders.every(function (h, i) { return currentHeaders[i] === h; });
+  if (!isLegacy) return; // already new layout (or something custom) - leave it alone
+
+  var lastRow = sheet.getLastRow();
+  var totalCols = sheet.getLastColumn();
+  var allValues = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, totalCols).getValues() : [];
+
+  // Any columns beyond the legacy fixed set were already "extra" columns
+  // added by a previous run of the new import code - preserve them verbatim.
+  var preexistingExtraHeaders = [];
+  if (totalCols > legacyHeaders.length) {
+    preexistingExtraHeaders = sheet.getRange(1, legacyHeaders.length + 1, 1, totalCols - legacyHeaders.length).getValues()[0];
+  }
+
+  var newExtraHeaders, buildRow;
+  if (side === SIDE_BANK) {
+    // legacy: RowId,Date,Reference,Description,Deposit,Withdrawal,Amount,Status,MatchId,MatchType,ResolutionNote,ImportedAt,SourceHash
+    newExtraHeaders = ['Description', 'Deposit', 'Withdrawal'].concat(preexistingExtraHeaders);
+    buildRow = function (r) {
+      var extra = [r[3], r[4], r[5]].concat(r.slice(13));
+      return [r[0], r[1], r[2], r[6], r[7], r[8], '', r[9], r[10], r[11], r[12]].concat(extra);
+    };
+  } else {
+    // legacy: RowId,Date,PatronId,TxnType,Reference,SecondaryReference,Amount,Status,MatchId,MatchType,ResolutionNote,ImportedAt,SourceHash
+    newExtraHeaders = ['Patron / Account Id', 'Txn Type', 'Secondary Reference'].concat(preexistingExtraHeaders);
+    buildRow = function (r) {
+      var extra = [r[2], r[3], r[5]].concat(r.slice(13));
+      return [r[0], r[1], r[4], r[6], r[7], r[8], '', r[9], r[10], r[11], r[12]].concat(extra);
+    };
+  }
+
+  var fixedHeaders = side === SIDE_BANK ? BANK_HEADERS : BO_HEADERS;
+  var newHeaderRow = fixedHeaders.concat(newExtraHeaders);
+  var newDataRows = allValues.map(buildRow);
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, newHeaderRow.length).setValues([newHeaderRow]);
+  sheet.setFrozenRows(1);
+  var bg = side === SIDE_BANK ? '#0b5394' : '#38761d';
+  sheet.getRange(1, 1, 1, fixedHeaders.length).setFontWeight('bold').setBackground(bg).setFontColor('#ffffff');
+  if (newExtraHeaders.length > 0) {
+    sheet.getRange(1, fixedHeaders.length + 1, 1, newExtraHeaders.length).setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
+  }
+  if (newDataRows.length > 0) {
+    sheet.getRange(2, 1, newDataRows.length, newHeaderRow.length).setValues(newDataRows);
+  }
+}
+
+/**
  * Creates the BANK and/or BO sheet(s) for a channel, based on its Type -
  * only the side(s) that type actually needs are created.
  *   - forceType, if given, is used directly (e.g. while creating a brand new
@@ -174,7 +265,9 @@ function boSheetName(channelKey) {
  *     an unknown/missing channel defaults to BOTH for backward compatibility
  *     with every channel created before the Type column existed.
  * Returns { bankSheet, boSheet } - a side's key is omitted if that side
- * isn't part of the channel's type.
+ * isn't part of the channel's type. Existing sheets are migrated in place if
+ * they still use the pre-column-customization layout (see
+ * migrateLegacyChannelSheet).
  */
 function ensureChannelSheets(channelKey, forceType) {
   var ss = getDataSpreadsheet();
@@ -192,6 +285,8 @@ function ensureChannelSheets(channelKey, forceType) {
       bankSheet.appendRow(BANK_HEADERS);
       bankSheet.setFrozenRows(1);
       bankSheet.getRange(1, 1, 1, BANK_HEADERS.length).setFontWeight('bold').setBackground('#0b5394').setFontColor('#ffffff');
+    } else {
+      migrateLegacyChannelSheet(bankSheet, SIDE_BANK);
     }
     result.bankSheet = bankSheet;
   }
@@ -202,6 +297,8 @@ function ensureChannelSheets(channelKey, forceType) {
       boSheet.appendRow(BO_HEADERS);
       boSheet.setFrozenRows(1);
       boSheet.getRange(1, 1, 1, BO_HEADERS.length).setFontWeight('bold').setBackground('#38761d').setFontColor('#ffffff');
+    } else {
+      migrateLegacyChannelSheet(boSheet, SIDE_BO);
     }
     result.boSheet = boSheet;
   }
@@ -225,6 +322,8 @@ function getSheetForSide(channelKey, side) {
   if (!sheet) {
     ensureChannelSheets(channelKey, type);
     sheet = ss.getSheetByName(name);
+  } else {
+    migrateLegacyChannelSheet(sheet, side);
   }
   return sheet;
 }
@@ -253,6 +352,95 @@ function readSheetAsObjects(sheet, colsMap) {
     results.push(obj);
   }
   return results;
+}
+
+/**
+ * Returns the "extra" (non-classified) column headers of a channel sheet -
+ * whatever the user chose to retain from their source file, in sheet order -
+ * as [{ header, colIndex (1-based) }, ...]. Columns are considered "extra"
+ * if they sit beyond the fixed classified/bookkeeping columns.
+ */
+function getExtraColumnDefs(sheet, fixedColsMap) {
+  var fixedCount = Object.keys(fixedColsMap).length;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol <= fixedCount) return [];
+  var headers = sheet.getRange(1, fixedCount + 1, 1, lastCol - fixedCount).getValues()[0];
+  var defs = [];
+  for (var i = 0; i < headers.length; i++) {
+    var header = String(headers[i] || '').trim();
+    if (!header) continue;
+    defs.push({ header: header, colIndex: fixedCount + i + 1 });
+  }
+  return defs;
+}
+
+/**
+ * Ensures every header in `headers` exists as an extra column on `sheet`
+ * (appending new columns at the end, matched case-insensitively/trimmed
+ * against what's already there so re-importing with the same selection
+ * reuses the same column instead of duplicating it). Returns a map of
+ * header -> 1-based column index for every requested header.
+ */
+function ensureExtraColumns(sheet, fixedColsMap, headers) {
+  var existing = getExtraColumnDefs(sheet, fixedColsMap);
+  var map = {};
+  existing.forEach(function (d) { map[d.header.toLowerCase()] = d.colIndex; });
+
+  var toAppend = [];
+  headers.forEach(function (h) {
+    var header = String(h || '').trim();
+    if (!header) return;
+    var key = header.toLowerCase();
+    if (map.hasOwnProperty(key)) return;
+    toAppend.push(header);
+  });
+
+  if (toAppend.length > 0) {
+    var startCol = sheet.getLastColumn() + 1;
+    sheet.getRange(1, startCol, 1, toAppend.length).setValues([toAppend])
+      .setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
+    toAppend.forEach(function (header, i) { map[header.toLowerCase()] = startCol + i; });
+  }
+
+  var result = {};
+  headers.forEach(function (h) {
+    var header = String(h || '').trim();
+    if (!header) return;
+    result[header] = map[header.toLowerCase()];
+  });
+  return result;
+}
+
+/**
+ * Like readSheetAsObjects, but also captures every "extra" column into an
+ * `extra` map keyed by header name (see getExtraColumnDefs). Use this
+ * wherever a row needs to be displayed or exported, so user-retained columns
+ * come along; use plain readSheetAsObjects for matching/internal logic that
+ * only ever needs the fixed classified fields.
+ */
+function readSheetRowsWithExtras(sheet, colsMap) {
+  var extraDefs = getExtraColumnDefs(sheet, colsMap);
+  var rows = readSheetAsObjects(sheet, colsMap);
+  if (extraDefs.length === 0) {
+    rows.forEach(function (r) { r.extra = {}; });
+    return rows;
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return rows;
+  var minExtraCol = extraDefs.reduce(function (min, d) { return Math.min(min, d.colIndex); }, extraDefs[0].colIndex);
+  var maxExtraCol = extraDefs.reduce(function (max, d) { return Math.max(max, d.colIndex); }, extraDefs[0].colIndex);
+  var extraValues = sheet.getRange(2, minExtraCol, lastRow - 1, maxExtraCol - minExtraCol + 1).getValues();
+
+  rows.forEach(function (r) {
+    var extra = {};
+    var valueRow = extraValues[r._row - 2]; // r._row is 1-based sheet row; extraValues is 0-based from row 2
+    extraDefs.forEach(function (d) {
+      extra[d.header] = valueRow ? valueRow[d.colIndex - minExtraCol] : '';
+    });
+    r.extra = extra;
+  });
+  return rows;
 }
 
 function colLetter(colIndex1Based) {

@@ -2,7 +2,8 @@
  * ============================================================================
  *  Config.gs
  *  Manages the list of reconciliation channels (banks / e-wallets / payment
- *  processors), each with its own matching tolerances.
+ *  processors), each with its own matching tolerances and - for channels
+ *  with a Bank side - which Back-Office channel it should reconcile against.
  * ============================================================================
  */
 
@@ -49,6 +50,12 @@ function getChannels() {
       // Channels created before this feature existed have a blank Type cell -
       // treated as BOTH, which is exactly their original (only) behavior.
       type: type,
+      // Which Back-Office-capable channel this channel's Bank side should
+      // reconcile against. Blank for BO-only channels (they're a target, not
+      // a source). Channels created before this feature existed, or a BOTH
+      // channel that has never had this set explicitly, default to matching
+      // themselves - exactly their original (only) behavior.
+      matchTarget: row.MatchTarget || (type === CHANNEL_TYPE_BOTH ? row.ChannelKey : ''),
       // Never send a raw Date object across google.script.run inside an array
       // of objects - it can fail to serialize and cause the WHOLE response to
       // come back as null on the client, wiping out every channel at once.
@@ -71,13 +78,43 @@ function channelKeyExists(key) {
 }
 
 /**
+ * Channels that can be the Back-Office side of a match (i.e. have a BO
+ * sheet): type BO or BOTH. Used to populate the "Matches To" dropdown for
+ * Bank-capable channels.
+ */
+function getBoCapableChannels() {
+  return getChannels().filter(function (c) { return c.type === CHANNEL_TYPE_BO || c.type === CHANNEL_TYPE_BOTH; });
+}
+
+/**
+ * Resolves the Back-Office-capable channel a given (already-fetched) channel
+ * object should reconcile its Bank side against, or null if none is
+ * configured / the configured target no longer exists or is no longer
+ * BO-capable.
+ */
+function resolveMatchTarget(channel) {
+  if (!channel) return null;
+  var targetKey = channel.matchTarget || (channel.type === CHANNEL_TYPE_BOTH ? channel.key : '');
+  if (!targetKey) return null;
+  var target = getChannel(targetKey);
+  if (!target) return null;
+  if (target.type !== CHANNEL_TYPE_BO && target.type !== CHANNEL_TYPE_BOTH) return null;
+  return target;
+}
+
+/**
  * Adds a new channel. `type` is 'BANK', 'BO', or 'BOTH' (default 'BOTH' for
  * backward compatibility with callers - like the default-channel seeder -
  * that don't specify one). Only the sheet(s) implied by `type` are created:
  * a 'BANK' channel gets just a BANK sheet, a 'BO' channel gets just a BO
  * sheet, and 'BOTH' gets the classic paired sheets.
+ *
+ * `matchTarget` (optional) is the channel key of the Back-Office-capable
+ * channel this channel's Bank side should reconcile against. If omitted and
+ * `type` is 'BOTH', it defaults to the new channel's own key (self-pair,
+ * matching the app's original behavior). Ignored for type 'BO'.
  */
-function addChannel(displayName, toleranceDays, amountTolerance, type) {
+function addChannel(displayName, toleranceDays, amountTolerance, type, matchTarget) {
   displayName = String(displayName || '').trim();
   if (!displayName) throw new Error('Channel name is required.');
 
@@ -90,6 +127,19 @@ function addChannel(displayName, toleranceDays, amountTolerance, type) {
   if (!key) throw new Error('Channel name must contain at least one letter or number.');
   if (channelKeyExists(key)) throw new Error('A channel named "' + displayName + '" already exists.');
 
+  matchTarget = String(matchTarget || '').trim();
+  if (type === CHANNEL_TYPE_BO) {
+    matchTarget = ''; // a BO-only channel is a target, not a source
+  } else if (!matchTarget && type === CHANNEL_TYPE_BOTH) {
+    matchTarget = key; // preserve original self-pairing behavior
+  } else if (matchTarget) {
+    var targetChannel = getChannel(matchTarget);
+    if (!targetChannel) throw new Error('Match target channel not found: ' + matchTarget);
+    if (targetChannel.type !== CHANNEL_TYPE_BO && targetChannel.type !== CHANNEL_TYPE_BOTH) {
+      throw new Error('"' + targetChannel.displayName + '" has no Back-Office side, so it can\'t be a match target.');
+    }
+  }
+
   var ss = getDataSpreadsheet();
   var sheet = ensureConfigSheet(ss);
   sheet.appendRow([
@@ -99,7 +149,8 @@ function addChannel(displayName, toleranceDays, amountTolerance, type) {
     amountTolerance || 0.01,
     true,
     new Date(),
-    type
+    type,
+    matchTarget
   ]);
 
   ensureChannelSheets(key, type);
@@ -114,6 +165,8 @@ function addChannel(displayName, toleranceDays, amountTolerance, type) {
  *     the change drops a side (e.g. BOTH -> BANK), that side's now-unused
  *     sheet is deleted too - this is destructive, the client must confirm
  *     with the user first.
+ *   matchTarget - the channel key of the Back-Office-capable channel this
+ *     channel's Bank side should reconcile against. Pass '' to clear it.
  */
 function updateChannel(channelKey, updates) {
   var ss = getDataSpreadsheet();
@@ -137,6 +190,24 @@ function updateChannel(channelKey, updates) {
   if (updates.hasOwnProperty('displayName') && updates.displayName) {
     sheet.getRange(target._row, CONFIG_COLS.DisplayName).setValue(String(updates.displayName));
   }
+  if (updates.hasOwnProperty('matchTarget')) {
+    var newTarget = String(updates.matchTarget || '').trim();
+    if (newTarget) {
+      if (newTarget === channelKey) {
+        var selfType = String(target.Type || '').trim().toUpperCase();
+        if (selfType !== CHANNEL_TYPE_BOTH) {
+          throw new Error('A channel can only match against itself if it is set up as "Both".');
+        }
+      } else {
+        var targetChannel = getChannel(newTarget);
+        if (!targetChannel) throw new Error('Match target channel not found: ' + newTarget);
+        if (targetChannel.type !== CHANNEL_TYPE_BO && targetChannel.type !== CHANNEL_TYPE_BOTH) {
+          throw new Error('"' + targetChannel.displayName + '" has no Back-Office side, so it can\'t be a match target.');
+        }
+      }
+    }
+    sheet.getRange(target._row, CONFIG_COLS.MatchTarget).setValue(newTarget);
+  }
   if (updates.hasOwnProperty('type')) {
     var newType = String(updates.type || '').trim().toUpperCase();
     if ([CHANNEL_TYPE_BANK, CHANNEL_TYPE_BO, CHANNEL_TYPE_BOTH].indexOf(newType) === -1) {
@@ -147,6 +218,11 @@ function updateChannel(channelKey, updates) {
 
     sheet.getRange(target._row, CONFIG_COLS.Type).setValue(newType);
     ensureChannelSheets(channelKey, newType); // create any newly-needed side
+
+    if (newType === CHANNEL_TYPE_BO) {
+      // No longer has a Bank side, so any match target is meaningless now.
+      sheet.getRange(target._row, CONFIG_COLS.MatchTarget).setValue('');
+    }
 
     if (updates.deleteUnusedSide) {
       var droppedBank = (oldType === CHANNEL_TYPE_BANK || oldType === CHANNEL_TYPE_BOTH) &&
@@ -169,6 +245,9 @@ function updateChannel(channelKey, updates) {
 /**
  * Deletes a channel's config row. Optionally also deletes its BANK/BO sheets
  * (destructive - client must confirm with the user before calling this).
+ * Any other channel whose Match Target pointed at this one is cleared back
+ * to "not configured" so it doesn't silently keep pointing at a deleted /
+ * orphaned target.
  */
 function deleteChannel(channelKey, alsoDeleteData) {
   var ss = getDataSpreadsheet();
@@ -186,6 +265,14 @@ function deleteChannel(channelKey, alsoDeleteData) {
     if (bankSheet) ss.deleteSheet(bankSheet);
     if (boSheet) ss.deleteSheet(boSheet);
   }
+
+  var remaining = readSheetAsObjects(sheet, CONFIG_COLS);
+  remaining.forEach(function (row) {
+    if (row.MatchTarget === channelKey) {
+      sheet.getRange(row._row, CONFIG_COLS.MatchTarget).setValue('');
+    }
+  });
+
   return true;
 }
 
@@ -237,8 +324,10 @@ function findOrphanedChannelSheets() {
 /**
  * Recreates Config rows for orphaned channel sheets found by
  * findOrphanedChannelSheets(). A pair (both BANK and BO sheets present) is
- * relinked as type BOTH; a lone sheet is relinked as type BANK or BO to
- * match whichever side actually exists.
+ * relinked as type BOTH (self-matching, as before this feature existed); a
+ * lone sheet is relinked as type BANK or BO to match whichever side actually
+ * exists (a relinked lone Bank sheet has no match target yet - configure one
+ * in Settings before reconciling it).
  */
 function relinkOrphanedChannels() {
   var ss = getDataSpreadsheet();
@@ -249,7 +338,8 @@ function relinkOrphanedChannels() {
 
   orphans.forEach(function (o) {
     var type = o.complete ? CHANNEL_TYPE_BOTH : (o.hasBank ? CHANNEL_TYPE_BANK : CHANNEL_TYPE_BO);
-    sheet.appendRow([o.key, o.key, 1, 0.01, true, now, type]);
+    var matchTarget = type === CHANNEL_TYPE_BOTH ? o.key : '';
+    sheet.appendRow([o.key, o.key, 1, 0.01, true, now, type, matchTarget]);
     relinked.push({ key: o.key, type: type });
   });
 
